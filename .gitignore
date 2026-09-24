@@ -4,3 +4,5 @@ __pycache__/
 .claude/
 .run/
 shared/
+texts.json
+files.json
