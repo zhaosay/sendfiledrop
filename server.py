@@ -262,6 +262,15 @@ def toggle_star_text(text_id, client_id):
 # 文件元数据存储
 # ---------------------------------------------------------------------------
 
+def load_version():
+    try:
+        with open(os.path.join(BASE_DIR, "version.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("version", "unknown")
+    except (OSError, ValueError):
+        return "unknown"
+
+
 def load_files():
     try:
         with open(FILES_META, "r", encoding="utf-8") as f:
@@ -521,7 +530,7 @@ def render_text_item(entry, viewer_cid, is_host):
     )
     bubble = f'<div class="bubble"><div class="tcontent">{safe_content}</div></div>'
     return (
-        f'<li class="msg {side}" data-search="{search_val}">'
+        f'<li class="msg {side}" data-search="{search_val}" data-meta="{ts}">'
         f'<div class="msg-meta">{sender} · {when}</div>'
         f'<div class="msg-row">{bubble}</div>'
         f'<div class="actions">{star_btn}{copy_btn}{del_btn}</div>'
@@ -570,7 +579,7 @@ def render_file_item(entry, viewer_cid, is_host):
             f'<div class="meta">{human_size(entry.get("size", 0))} · {meta_line}</div></div></div></div>'
         )
         return (
-            f'<li class="msg {side} ghost" data-search="{search_val}">'
+            f'<li class="msg {side} ghost" data-search="{search_val}" data-meta="{uploaded_ts}">'
             f'<div class="msg-meta">{sender} · {when}</div>'
             f'<div class="msg-row">{bubble}</div>'
             f'<div class="actions">{star_btn}{reshare_btn}{del_btn}</div>'
@@ -604,7 +613,7 @@ def render_file_item(entry, viewer_cid, is_host):
     )
     bubble = f'<div class="bubble file-bubble">{bubble_top}{preview_html}</div>'
     return (
-        f'<li class="msg {side}" data-search="{search_val}">'
+        f'<li class="msg {side}" data-search="{search_val}" data-meta="{uploaded_ts}">'
         f'<div class="msg-meta">{sender} · {when}</div>'
         f'<div class="msg-row">{bubble}</div>'
         f'<div class="actions">{star_btn}{dl_btn}{del_btn}</div>'
@@ -647,6 +656,25 @@ def build_feed(filter_key, viewer_cid, is_host):
         title, sub = labels.get(filter_key, labels["all"])
         return _empty_block(title, sub)
     return "<ul>" + "".join(rows) + "</ul>"
+
+
+def get_active_senders():
+    """获取所有活跃的发送者及其最后活动时间"""
+    texts = load_texts()
+    files = load_files()
+    senders = {}
+    for t in texts:
+        sender = t.get("sender") or "访客"
+        ts = t.get("ts", 0)
+        if sender not in senders or ts > senders[sender]:
+            senders[sender] = ts
+    for f in files:
+        sender = f.get("sender") or "访客"
+        ts = f.get("last_seen_ts", f.get("uploaded_ts", 0))
+        if sender not in senders or ts > senders[sender]:
+            senders[sender] = ts
+    sorted_senders = sorted(senders.items(), key=lambda x: x[1], reverse=True)
+    return [{"name": name, "ts": ts} for name, ts in sorted_senders]
 
 
 def build_favorites(viewer_cid, is_host):
@@ -711,11 +739,18 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .search-input { padding:8px 12px; font-size:12px; border:1px solid var(--line); border-radius:10px;
     background:#fff; color:var(--ink); width:100%; }
   .search-input:focus { outline:none; border-color:var(--blue2); }
-  .filter-bar { flex:none; display:flex; gap:7px; flex-wrap:wrap; padding:14px 20px 0; }
-  .tab { padding:7px 14px; color:var(--muted); font-size:12.5px; font-weight:650; border:1px solid var(--line);
+  .filter-bar { flex:none; display:flex; gap:7px; flex-wrap:wrap; padding:14px 20px 0; align-items:center; }
+  .tab,.time-tab { padding:7px 14px; color:var(--muted); font-size:12.5px; font-weight:650; border:1px solid var(--line);
     background:#fff; border-radius:99px; cursor:pointer; transition:.15s; }
-  .tab:hover { color:var(--blue); border-color:var(--blue2); }
-  .tab.active { color:#fff; background:linear-gradient(135deg,var(--blue2),var(--blue)); border-color:transparent; }
+  .tab:hover,.time-tab:hover { color:var(--blue); border-color:var(--blue2); }
+  .tab.active,.time-tab.active { color:#fff; background:linear-gradient(135deg,var(--blue2),var(--blue)); border-color:transparent; }
+  .time-filter-sep { width:1px; height:20px; background:var(--line); margin:0 4px; }
+  .senders-block { display:flex; flex-direction:column; gap:8px; }
+  .senders-title { color:var(--muted); font-size:11px; font-weight:750; letter-spacing:.06em; text-transform:uppercase; }
+  .senders-list { display:flex; flex-wrap:wrap; gap:6px; }
+  .sender-btn { padding:6px 11px; font-size:11px; color:var(--muted); background:#fff; border:1px solid var(--line); border-radius:99px; cursor:pointer; transition:.15s; }
+  .sender-btn:hover { color:var(--blue); border-color:var(--blue2); }
+  .sender-btn.active { color:#fff; background:linear-gradient(135deg,var(--blue2),var(--blue)); border-color:transparent; }
   .favorites-block { flex:1; min-height:100px; display:flex; flex-direction:column; gap:8px; }
   .favorites-title { color:var(--muted); font-size:11px; font-weight:750; letter-spacing:.06em; text-transform:uppercase; }
   .favorites-list { flex:1; overflow-y:auto; }
@@ -725,6 +760,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .ghost-btn { padding:7px 11px; color:#a16a6d; font-size:11px; font-weight:650; background:#f7f1f2; border:0;
     border-radius:8px; cursor:pointer; width:100%; text-align:left; }
   .disk-note { color:var(--muted); font-size:11px; }
+  .version-badge { margin-top:auto; color:var(--muted); font-size:10px; text-align:center; padding-top:12px; border-top:1px solid var(--line); }
   .feed { flex:1; overflow-y:auto; padding:14px 20px 20px; -webkit-overflow-scrolling:touch; }
   .star-btn svg { width:16px; fill:none; }
   .star-btn.starred { color:#f5b400; background:#fff7de; }
@@ -832,12 +868,18 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     <button id="nicknamePill" class="nickname-pill" title="点击修改昵称"></button>
     <input id="searchInput" class="search-input" placeholder="搜索文件名 / 文字…">
 
+    <div class="senders-block">
+      <div class="senders-title">最近活跃</div>
+      <div id="sendersList" class="senders-list"></div>
+    </div>
+
     <div class="favorites-block">
       <div class="favorites-title">收藏</div>
       <div id="favoritesList" class="favorites-list">__FAVORITES__</div>
     </div>
 
     <div class="host-controls">__HOST_CONTROLS__</div>
+    <div class="version-badge">v__VERSION__</div>
   </aside>
 
   <main class="main">
@@ -852,6 +894,11 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
       <button class="tab" data-tab="text">文字列表</button>
       <button class="tab" data-tab="media">多媒体列表</button>
       <button class="tab" data-tab="file">文件列表</button>
+      <div class="time-filter-sep"></div>
+      <button class="time-tab" data-time="all">全部时间</button>
+      <button class="time-tab" data-time="today">今天</button>
+      <button class="time-tab" data-time="week">本周</button>
+      <button class="time-tab" data-time="month">本月</button>
     </div>
 
     <div id="feed" class="feed">__FEED__</div>
@@ -885,6 +932,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 
   var feedEl = document.getElementById('feed');
   var favoritesList = document.getElementById('favoritesList');
+  var sendersList = document.getElementById('sendersList');
   var tabs = document.querySelectorAll('.tab');
   var searchInput = document.getElementById('searchInput');
   var textInput = document.getElementById('textInput');
@@ -901,6 +949,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   var sidebarEl = document.querySelector('.sidebar');
   var drawerBackdrop = document.getElementById('drawerBackdrop');
 
+  var currentSenderFilter = null;
+
   function openDrawer() { sidebarEl.classList.add('open'); drawerBackdrop.classList.add('show'); }
   function closeDrawer() { sidebarEl.classList.remove('open'); drawerBackdrop.classList.remove('show'); }
   if (menuToggle) {
@@ -912,6 +962,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 
   var currentFilter = 'all';
   var currentSearch = '';
+  var currentTimeFilter = 'all';
   var lastVersion = null;
   var pendingReshareId = null;
   var origTitle = document.title;
@@ -939,12 +990,40 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     refreshNicknamePill();
   };
 
+  function getTimeRange(type) {
+    var now = new Date();
+    var start = new Date();
+    switch(type) {
+      case 'today':
+        start.setHours(0, 0, 0, 0);
+        return start.getTime() / 1000;
+      case 'week':
+        start.setDate(start.getDate() - start.getDay());
+        start.setHours(0, 0, 0, 0);
+        return start.getTime() / 1000;
+      case 'month':
+        start.setDate(1);
+        start.setHours(0, 0, 0, 0);
+        return start.getTime() / 1000;
+      default:
+        return 0;
+    }
+  }
+
   function applySearch() {
     var q = currentSearch.trim().toLowerCase();
     var items = feedEl.querySelectorAll('li[data-search]');
+    var minTime = getTimeRange(currentTimeFilter);
     items.forEach(function (li) {
       var s = li.getAttribute('data-search') || '';
-      li.style.display = (!q || s.indexOf(q) !== -1) ? '' : 'none';
+      var sender = li.querySelector('.msg-meta');
+      var senderName = sender ? sender.textContent.split(' · ')[0] : '';
+      var meta = li.getAttribute('data-meta') || '';
+      var ts = parseFloat(meta) || 0;
+      var matchSearch = !q || s.indexOf(q) !== -1;
+      var matchSender = !currentSenderFilter || senderName.indexOf(currentSenderFilter) !== -1;
+      var matchTime = currentTimeFilter === 'all' || ts >= minTime;
+      li.style.display = (matchSearch && matchSender && matchTime) ? '' : 'none';
     });
   }
   searchInput.oninput = function () {
@@ -976,6 +1055,38 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
       .then(function (htmlStr) { favoritesList.innerHTML = htmlStr; updateExpiryLabels(); });
   }
 
+  function refreshSenders() {
+    fetch('/senders')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var html = '';
+        if (data.senders && data.senders.length > 0) {
+          data.senders.forEach(function (sender) {
+            var active = currentSenderFilter === sender.name ? ' active' : '';
+            html += '<button class="sender-btn' + active + '" data-sender="' + sender.name.replace(/"/g, '&quot;') + '">' + sender.name + '</button>';
+          });
+        }
+        sendersList.innerHTML = html;
+        attachSenderListeners();
+      });
+  }
+
+  function attachSenderListeners() {
+    var senderBtns = sendersList.querySelectorAll('.sender-btn');
+    senderBtns.forEach(function (btn) {
+      btn.onclick = function () {
+        var sender = btn.getAttribute('data-sender');
+        if (currentSenderFilter === sender) {
+          currentSenderFilter = null;
+        } else {
+          currentSenderFilter = sender;
+        }
+        refreshSenders();
+        applySearch();
+      };
+    });
+  }
+
   function formatRemaining(seconds) {
     if (seconds <= 0) return '即将清除';
     var days = Math.floor(seconds / 86400);
@@ -1004,6 +1115,17 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
       refreshFeed(currentFilter === 'all' || currentFilter === 'text');
     };
   });
+
+  var timeTabs = document.querySelectorAll('.time-tab');
+  timeTabs.forEach(function (tab) {
+    tab.onclick = function () {
+      timeTabs.forEach(function (t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      currentTimeFilter = tab.getAttribute('data-time');
+      applySearch();
+    };
+  });
+  if (timeTabs.length > 0) timeTabs[0].classList.add('active');
 
   function beep() {
     try {
@@ -1034,12 +1156,14 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
         notifyNewContent();
         refreshFeed();
         refreshFavorites();
+        refreshSenders();
       }
       lastVersion = data.version;
     }).catch(function () {});
   }
   scrollFeedToBottom();
   window.addEventListener('load', scrollFeedToBottom);
+  refreshSenders();
   poll();
   setInterval(poll, 3000);
 
@@ -1310,6 +1434,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         feed_html = build_feed("all", self._client_id, is_host)
         favorites_html = build_favorites(self._client_id, is_host)
         default_name = friendly_name_for(self._client_id)
+        version = load_version()
         host_controls = ""
         if is_host:
             disk_bytes = _dir_size(SHARE_DIR)
@@ -1325,6 +1450,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             .replace("__FAVORITES__", favorites_html)
             .replace("__DEFAULT_NAME__", html.escape(default_name))
             .replace("__HOST_CONTROLS__", host_controls)
+            .replace("__VERSION__", html.escape(version))
         )
         self._send_html(page, head_only=head_only)
 
@@ -1359,6 +1485,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/favorites":
             frag = build_favorites(self._client_id, self._is_host())
             self._send_html(frag, head_only=head_only)
+            return
+
+        if path == "/senders":
+            senders = get_active_senders()
+            self._send_json({"senders": senders}, head_only=head_only)
             return
 
         if path.startswith("/download/"):
