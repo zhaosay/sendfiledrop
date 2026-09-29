@@ -179,7 +179,7 @@ def sync_once(server_url: str, folder_name: str, folder_id: str, local_dir: str,
         return False
 
     remote = {k: v for k, v in resp.get('manifest', {}).items()}
-    base = {k: v.get('rev') and state.get(k, {}) or {} for k in remote.keys()}
+    base = state or {}
 
     actions = decide(local, remote, base, device_name)
 
@@ -204,11 +204,16 @@ def sync_once(server_url: str, folder_name: str, folder_id: str, local_dir: str,
             path, info = action[1], action[2]
             fullpath = os.path.join(local_dir, path)
             try:
-                os.makedirs(os.path.dirname(fullpath), exist_ok=True)
+                dirpath = os.path.dirname(fullpath)
+                if dirpath:
+                    os.makedirs(dirpath, exist_ok=True)
+                else:
+                    dirpath = local_dir
+
                 url = f"{server_url}/api/sync/file?folder={folder_id}&path={urllib.parse.quote(path)}"
                 req = urllib.request.Request(url)
                 with urllib.request.urlopen(req, timeout=10) as r:
-                    temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(fullpath))
+                    temp_fd, temp_path = tempfile.mkstemp(dir=dirpath)
                     try:
                         bytes_written = 0
                         while True:
@@ -223,9 +228,15 @@ def sync_once(server_url: str, folder_name: str, folder_id: str, local_dir: str,
                             os.utime(fullpath, (info['mtime'], info['mtime']))
                         state[path] = {'rev': info.get('rev', 0), 'sha256': info.get('sha256', ''), 'mtime': info.get('mtime', 0), 'size': info.get('size', 0)}
                         print(f"下载: {path}")
-                    except:
-                        os.close(temp_fd)
-                        os.unlink(temp_path)
+                    except Exception as e:
+                        try:
+                            os.close(temp_fd)
+                        except:
+                            pass
+                        try:
+                            os.unlink(temp_path)
+                        except:
+                            pass
                         raise
             except Exception as e:
                 print(f"下载异常: {path} - {e}")
