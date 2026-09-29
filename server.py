@@ -33,6 +33,13 @@ import threading
 import uuid
 import time
 import hashlib
+import io
+
+# ---- 导入同步模块 ----
+try:
+    import sync_store
+except ImportError:
+    sync_store = None
 
 # ---- 配置 ----
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
@@ -957,6 +964,29 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     .sidebar { width:88%; padding:14px; gap:12px; }
     .feed { padding:10px 14px 16px; }
   }
+  /* ===== 同步文件夹面板 ===== */
+  .sync-folders-block { margin-top:14px; }
+  .sync-folders-title { font-size:12.5px; font-weight:600; color:var(--text-secondary); letter-spacing:.04em; text-transform:uppercase; margin-bottom:8px; padding:0 4px; }
+  .sync-folders-list { display:flex; flex-direction:column; gap:4px; }
+  .sync-folder-btn { padding:8px 10px; text-align:left; font-size:13px; color:var(--text-primary); background:#f9fafb; border:1px solid var(--line);
+    border-radius:var(--radius-soft); cursor:pointer; transition:all .2s cubic-bezier(0.16,1,0.3,1); }
+  .sync-folder-btn:hover { background:#f0f3f8; border-color:var(--blue2); color:var(--text-interactive); }
+  .sync-folder-btn.active { background:#edf3ff; border-color:var(--blue); color:var(--blue); font-weight:600; }
+  .sync-folder-item { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .sync-folder-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+  .sync-folder-count { font-size:11px; color:var(--text-tertiary); white-space:nowrap; }
+  .sync-folder-actions { display:flex; gap:2px; }
+  .sync-add-btn { padding:6px 12px; font-size:12px; color:var(--text-interactive); background:transparent; border:1px dashed var(--blue); border-radius:var(--radius-soft);
+    cursor:pointer; font-weight:600; transition:all .2s cubic-bezier(0.16,1,0.3,1); }
+  .sync-add-btn:hover { background:#edf3ff; border-style:solid; }
+  @media (prefers-color-scheme: dark) {
+    .sync-folders-block { }
+    .sync-folder-btn { background:#1a1f2e; border-color:rgba(255,255,255,.1); color:var(--text-primary); }
+    .sync-folder-btn:hover { background:#262d3d; border-color:var(--blue2); }
+    .sync-folder-btn.active { background:#1a2844; border-color:var(--blue); color:var(--blue); }
+    .sync-add-btn { border-color:rgba(91,140,255,.4); }
+    .sync-add-btn:hover { background:rgba(91,140,255,.1); }
+  }
   @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto!important; transition:none!important; } }
 </style>
 </head>
@@ -989,6 +1019,11 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     <div class="favorites-block">
       <div class="favorites-title">收藏</div>
       <div id="favoritesList" class="favorites-list">__FAVORITES__</div>
+    </div>
+
+    <div id="syncFoldersBlock" class="sync-folders-block" style="display:none;">
+      <div class="sync-folders-title">同步文件夹</div>
+      <div id="syncFoldersList" class="sync-folders-list"></div>
     </div>
 
     <div class="host-controls">__HOST_CONTROLS__</div>
@@ -1277,8 +1312,38 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   scrollFeedToBottom();
   window.addEventListener('load', scrollFeedToBottom);
   refreshSenders();
+  refreshSyncFolders();
   poll();
   setInterval(poll, 3000);
+
+  function refreshSyncFolders() {
+    fetch('/api/sync/folders').then(function (r) { return r.json(); }).then(function (data) {
+      var folders = data.folders || {};
+      var block = document.getElementById('syncFoldersBlock');
+      var list = document.getElementById('syncFoldersList');
+      if (Object.keys(folders).length === 0) {
+        block.style.display = 'none';
+        return;
+      }
+      block.style.display = 'block';
+      var html = '';
+      Object.entries(folders).forEach(function (entry) {
+        var folderId = entry[0], info = entry[1];
+        html += '<div class="sync-folder-btn">' +
+          '<div class="sync-folder-item">' +
+          '<span class="sync-folder-name">' + escapeHtml(info.name) + '</span>' +
+          '<span class="sync-folder-count">' + info.file_count + ' 文件</span>' +
+          '</div>' +
+          '</div>';
+      });
+      list.innerHTML = html;
+    }).catch(function () {});
+  }
+
+  function escapeHtml(text) {
+    var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+    return text.replace(/[&<>"']/g, function (m) { return map[m]; });
+  }
 
   function doSendText() {
     var val = textInput.value;
@@ -1617,6 +1682,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._serve_file(name, head_only, inline=True)
             return
 
+        # ---- 同步文件夹路由 ----
+        if sync_store and path == "/api/sync/folders":
+            self._handle_sync_get_folders(head_only)
+            return
+
+        if sync_store and path == "/api/sync/manifest":
+            folder_id = qs.get("folder", [None])[0]
+            self._handle_sync_get_manifest(folder_id, head_only)
+            return
+
+        if sync_store and path.startswith("/api/sync/file"):
+            folder_id = qs.get("folder", [None])[0]
+            file_path = qs.get("path", [None])[0]
+            self._handle_sync_download_file(folder_id, file_path, head_only)
+            return
+
         self._send_html("<h1>404</h1>", 404, head_only=head_only)
 
     def _serve_file(self, name, head_only, inline=False):
@@ -1680,7 +1761,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # -- POST ------------------------------------------------------------
     def do_POST(self):
         self._prepare()
-        path = urllib.parse.urlparse(self.path).path
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        qs = urllib.parse.parse_qs(parsed.query)
 
         if path == "/text":
             self._handle_add_text(); return
@@ -1698,6 +1781,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_star("text", path[len("/star/text/"):]); return
         if path.startswith("/star/file/"):
             self._handle_star("file", path[len("/star/file/"):]); return
+
+        # ---- 同步文件夹路由 ----
+        if sync_store and path == "/api/sync/folders":
+            self._handle_sync_create_folder(); return
+        if sync_store and path.startswith("/api/sync/folders/delete/"):
+            folder_id = path[len("/api/sync/folders/delete/"):]
+            self._handle_sync_delete_folder(folder_id); return
+        if sync_store and path.startswith("/api/sync/file"):
+            folder_id = qs.get("folder", [None])[0]
+            file_path = qs.get("path", [None])[0]
+            base_rev = qs.get("base_rev", [None])[0]
+            self._handle_sync_upload_file(folder_id, file_path, base_rev); return
 
         self._send_html("<h1>404</h1>", 404)
 
@@ -1793,6 +1888,122 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self._send_html("ok")
 
+    # ---- 同步文件夹处理函数 ----
+    def _handle_sync_get_folders(self, head_only):
+        """GET /api/sync/folders - 获取所有同步文件夹列表"""
+        folders = sync_store.get_folders()
+        self._send_json({"folders": folders}, head_only=head_only)
+
+    def _handle_sync_get_manifest(self, folder_id, head_only):
+        """GET /api/sync/manifest?folder=<id> - 获取文件夹 manifest"""
+        if not folder_id:
+            self._send_json({"error": "Missing folder"}, code=400, head_only=head_only)
+            return
+        manifest, error = sync_store.get_manifest(folder_id)
+        if error:
+            self._send_json({"error": error}, code=404, head_only=head_only)
+            return
+        self._send_json({"manifest": manifest}, head_only=head_only)
+
+    def _handle_sync_download_file(self, folder_id, rel_path, head_only):
+        """GET /api/sync/file?folder=<id>&path=<path> - 下载同步文件"""
+        if not folder_id or not rel_path:
+            self._send_html("<h1>400</h1>", 400, head_only=head_only)
+            return
+        file_path, error = sync_store.read_file(folder_id, rel_path)
+        if error:
+            self._send_html(f"<h1>404</h1>", 404, head_only=head_only)
+            return
+        try:
+            size = os.path.getsize(file_path)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{urllib.parse.quote(os.path.basename(rel_path))}")
+            self._maybe_set_cookie()
+            self.end_headers()
+            if not head_only:
+                with open(file_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+        except (OSError, IOError):
+            self._send_html("<h1>500</h1>", 500, head_only=head_only)
+
+    def _handle_sync_create_folder(self):
+        """POST /api/sync/folders - 创建新同步文件夹（主机专属）"""
+        if not self._is_host():
+            self._send_html("<h1>403</h1>", 403)
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            body = self.rfile.read(length).decode("utf-8", "replace")
+            params = urllib.parse.parse_qs(body)
+            name = params.get("name", [""])[0].strip()
+            if not name:
+                self._send_json({"error": "Name required"}, code=400)
+                return
+            folder_id, error = sync_store.create_folder(name)
+            if error:
+                self._send_json({"error": error}, code=400)
+                return
+            bump_version()
+            self._send_json({"folder_id": folder_id, "name": name})
+        except Exception as e:  # noqa: BLE001
+            self._send_json({"error": str(e)}, code=500)
+
+    def _handle_sync_delete_folder(self, folder_id):
+        """POST /api/sync/folders/delete/<id> - 删除同步文件夹（主机专属）"""
+        if not self._is_host():
+            self._send_html("<h1>403</h1>", 403)
+            return
+        error = sync_store.delete_folder(folder_id)
+        if error:
+            self._send_json({"error": error}, code=400)
+            return
+        bump_version()
+        self._send_json({"ok": True})
+
+    def _handle_sync_upload_file(self, folder_id, rel_path, base_rev):
+        """PUT /api/sync/file?folder=<id>&path=<path>&base_rev=<rev> - 上传文件"""
+        if not folder_id or not rel_path:
+            self._send_json({"error": "Missing folder or path"}, code=400)
+            return
+        try:
+            base_rev = int(base_rev) if base_rev else None
+        except (ValueError, TypeError):
+            base_rev = None
+
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0:
+            self._send_json({"error": "Empty file"}, code=400)
+            return
+
+        file_obj = io.BytesIO()
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(65536, remaining))
+            if not chunk:
+                break
+            file_obj.write(chunk)
+            remaining -= len(chunk)
+
+        file_obj.seek(0)
+        success, error, new_rev = sync_store.write_file(folder_id, rel_path, file_obj, base_rev)
+
+        if not success:
+            if "Conflict" in error or "mismatch" in error:
+                self._send_json({"error": error, "current_rev": new_rev}, code=409)
+            else:
+                self._send_json({"error": error}, code=400)
+            return
+
+        bump_version()
+        self._send_json({"ok": True, "rev": new_rev})
+
+    # ---- multipart 解析 ----
     def _parse_multipart(self, body, boundary):
         """轻量 multipart 解析，不依赖已被移除的 cgi 模块。返回 [(filename, content), ...]"""
         delim = b"--" + boundary.encode("latin-1")
