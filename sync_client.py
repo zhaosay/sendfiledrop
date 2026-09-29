@@ -137,12 +137,11 @@ def decide(local: Dict, remote: Dict, base: Dict, device_name: str) -> list:
             actions.append(('download', path, r))
 
     for path in sorted(base.keys()):
-        if path not in local and path not in remote:
-            continue
-        if path not in local and path in remote and not remote[path].get('deleted'):
-            continue
         if path not in local and path in base:
-            actions.append(('delete_local', path))
+            if path in remote and not remote[path].get('deleted'):
+                actions.append(('delete_remote', path, base[path]))
+            elif path not in remote:
+                actions.append(('delete_local', path))
 
     return actions
 
@@ -241,6 +240,19 @@ def sync_once(server_url: str, folder_name: str, folder_id: str, local_dir: str,
             except Exception as e:
                 print(f"下载异常: {path} - {e}")
 
+        elif action[0] == 'delete_remote':
+            path, info = action[1], action[2]
+            try:
+                url = f"{server_url}/api/sync/file?folder={folder_id}&path={urllib.parse.quote(path)}&base_rev={state.get(path, {}).get('rev', 0)}&device={device_name}"
+                ok, resp = http_request(url, 'DELETE')
+                if ok:
+                    state.pop(path, None)
+                    print(f"删除服务器文件: {path}")
+                else:
+                    print(f"删除失败: {path} - {resp}")
+            except Exception as e:
+                print(f"删除异常: {path} - {e}")
+
         elif action[0] == 'delete_local':
             path = action[1]
             fullpath = os.path.join(local_dir, path)
@@ -248,7 +260,7 @@ def sync_once(server_url: str, folder_name: str, folder_id: str, local_dir: str,
                 if os.path.exists(fullpath):
                     os.unlink(fullpath)
                 state.pop(path, None)
-                print(f"删除: {path}")
+                print(f"删除本地: {path}")
             except Exception as e:
                 print(f"删除异常: {path} - {e}")
 
