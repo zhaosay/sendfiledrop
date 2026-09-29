@@ -1305,6 +1305,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
         refreshFeed();
         refreshFavorites();
         refreshSenders();
+        refreshSyncFolders();
       }
       lastVersion = data.version;
     }).catch(function () {});
@@ -1315,30 +1316,6 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   refreshSyncFolders();
   poll();
   setInterval(poll, 3000);
-
-  function refreshSyncFolders() {
-    fetch('/api/sync/folders').then(function (r) { return r.json(); }).then(function (data) {
-      var folders = data.folders || {};
-      var block = document.getElementById('syncFoldersBlock');
-      var list = document.getElementById('syncFoldersList');
-      if (Object.keys(folders).length === 0) {
-        block.style.display = 'none';
-        return;
-      }
-      block.style.display = 'block';
-      var html = '';
-      Object.entries(folders).forEach(function (entry) {
-        var folderId = entry[0], info = entry[1];
-        html += '<div class="sync-folder-btn">' +
-          '<div class="sync-folder-item">' +
-          '<span class="sync-folder-name">' + escapeHtml(info.name) + '</span>' +
-          '<span class="sync-folder-count">' + info.file_count + ' 文件</span>' +
-          '</div>' +
-          '</div>';
-      });
-      list.innerHTML = html;
-    }).catch(function () {});
-  }
 
   function escapeHtml(text) {
     var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
@@ -1759,6 +1736,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             pass
 
     # -- POST ------------------------------------------------------------
+    def do_PUT(self):
+        """Handle PUT requests (for file uploads in sync)"""
+        self._prepare()
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        if sync_store and path.startswith("/api/sync/file"):
+            folder_id = qs.get("folder", [None])[0]
+            file_path = qs.get("path", [None])[0]
+            base_rev = qs.get("base_rev", [None])[0]
+            self._handle_sync_upload_file(folder_id, file_path, base_rev)
+            return
+
+        self._send_html("<h1>404</h1>", 404)
+
+    def do_DELETE(self):
+        """Handle DELETE requests (for file deletion in sync)"""
+        self._prepare()
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        if sync_store and path.startswith("/api/sync/file"):
+            folder_id = qs.get("folder", [None])[0]
+            file_path = qs.get("path", [None])[0]
+            base_rev = qs.get("base_rev", [None])[0]
+            self._handle_sync_delete_sync_file(folder_id, file_path, base_rev)
+            return
+
+        self._send_html("<h1>404</h1>", 404)
+
     def do_POST(self):
         self._prepare()
         parsed = urllib.parse.urlparse(self.path)
@@ -1788,11 +1797,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if sync_store and path.startswith("/api/sync/folders/delete/"):
             folder_id = path[len("/api/sync/folders/delete/"):]
             self._handle_sync_delete_folder(folder_id); return
-        if sync_store and path.startswith("/api/sync/file"):
-            folder_id = qs.get("folder", [None])[0]
-            file_path = qs.get("path", [None])[0]
-            base_rev = qs.get("base_rev", [None])[0]
-            self._handle_sync_upload_file(folder_id, file_path, base_rev); return
 
         self._send_html("<h1>404</h1>", 404)
 
@@ -1892,7 +1896,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _handle_sync_get_folders(self, head_only):
         """GET /api/sync/folders - 获取所有同步文件夹列表"""
         folders = sync_store.get_folders()
-        self._send_json({"folders": folders}, head_only=head_only)
+        self._send_json({"folders": folders, "is_host": self._is_host()}, head_only=head_only)
 
     def _handle_sync_get_manifest(self, folder_id, head_only):
         """GET /api/sync/manifest?folder=<id> - 获取文件夹 manifest"""
@@ -1977,21 +1981,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             base_rev = None
 
         length = int(self.headers.get("Content-Length", 0))
-        if length <= 0:
-            self._send_json({"error": "Empty file"}, code=400)
+        if length < 0:
+            self._send_json({"error": "Missing Content-Length"}, code=400)
             return
 
-        file_obj = io.BytesIO()
-        remaining = length
-        while remaining > 0:
-            chunk = self.rfile.read(min(65536, remaining))
-            if not chunk:
-                break
-            file_obj.write(chunk)
-            remaining -= len(chunk)
+        class LimitedFileWrapper:
+            """Wrapper to limit file-like object reads to Content-Length bytes"""
+            def __init__(self, rfile, size):
+                self.rfile = rfile
+                self.remaining = size
+            def read(self, sz=65536):
+                if self.remaining <= 0:
+                    return b""
+                to_read = min(sz, self.remaining)
+                data = self.rfile.read(to_read)
+                self.remaining -= len(data)
+                return data
 
-        file_obj.seek(0)
-        success, error, new_rev = sync_store.write_file(folder_id, rel_path, file_obj, base_rev)
+        file_wrapper = LimitedFileWrapper(self.rfile, length)
+        success, error, new_rev = sync_store.write_file(folder_id, rel_path, file_wrapper, base_rev)
 
         if not success:
             if "Conflict" in error or "mismatch" in error:
@@ -2002,6 +2010,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         bump_version()
         self._send_json({"ok": True, "rev": new_rev})
+
+    def _handle_sync_delete_sync_file(self, folder_id, rel_path, base_rev):
+        """DELETE /api/sync/file?folder=<id>&path=<path>&base_rev=<rev> - 删除文件"""
+        if not folder_id or not rel_path:
+            self._send_json({"error": "Missing folder or path"}, code=400)
+            return
+        try:
+            base_rev = int(base_rev) if base_rev else None
+        except (ValueError, TypeError):
+            base_rev = None
+
+        success, error = sync_store.delete_file(folder_id, rel_path, base_rev)
+
+        if not success:
+            if "Conflict" in error or "mismatch" in error:
+                self._send_json({"error": error}, code=409)
+            else:
+                self._send_json({"error": error}, code=400)
+            return
+
+        bump_version()
+        self._send_json({"ok": True})
 
     # ---- multipart 解析 ----
     def _parse_multipart(self, body, boundary):

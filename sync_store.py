@@ -46,9 +46,6 @@ def safe_join(base: str, rel: str) -> Optional[str]:
     if not str(target).startswith(str(base_path) + os.sep) and target != base_path:
         return None
 
-    if os.path.islink(target):
-        return None
-
     return str(target)
 
 
