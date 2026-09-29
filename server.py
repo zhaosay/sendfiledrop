@@ -1675,6 +1675,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_sync_download_file(folder_id, file_path, head_only)
             return
 
+        if sync_store and path == "/sync_client.py":
+            self._serve_sync_client(head_only)
+            return
+
         self._send_html("<h1>404</h1>", 404, head_only=head_only)
 
     def _serve_file(self, name, head_only, inline=False):
@@ -1747,7 +1751,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             folder_id = qs.get("folder", [None])[0]
             file_path = qs.get("path", [None])[0]
             base_rev = qs.get("base_rev", [None])[0]
-            self._handle_sync_upload_file(folder_id, file_path, base_rev)
+            device = qs.get("device", [None])[0]
+            self._handle_sync_upload_file(folder_id, file_path, base_rev, device)
             return
 
         self._send_html("<h1>404</h1>", 404)
@@ -1763,7 +1768,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             folder_id = qs.get("folder", [None])[0]
             file_path = qs.get("path", [None])[0]
             base_rev = qs.get("base_rev", [None])[0]
-            self._handle_sync_delete_sync_file(folder_id, file_path, base_rev)
+            device = qs.get("device", [None])[0]
+            self._handle_sync_delete_sync_file(folder_id, file_path, base_rev, device)
             return
 
         self._send_html("<h1>404</h1>", 404)
@@ -1893,6 +1899,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._send_html("ok")
 
     # ---- 同步文件夹处理函数 ----
+    def _serve_sync_client(self, head_only):
+        """GET /sync_client.py - 分发同步代理脚本"""
+        script_path = os.path.join(BASE_DIR, "sync_client.py")
+        if not os.path.isfile(script_path):
+            self._send_html("<h1>404 sync_client.py 不存在</h1>", 404, head_only=head_only)
+            return
+        try:
+            size = os.path.getsize(script_path)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", "attachment; filename=sync_client.py")
+            self._maybe_set_cookie()
+            self.end_headers()
+            if not head_only:
+                with open(script_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+        except (OSError, IOError):
+            self._send_html("<h1>500</h1>", 500, head_only=head_only)
+
     def _handle_sync_get_folders(self, head_only):
         """GET /api/sync/folders - 获取所有同步文件夹列表"""
         folders = sync_store.get_folders()
@@ -1970,8 +2000,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         bump_version()
         self._send_json({"ok": True})
 
-    def _handle_sync_upload_file(self, folder_id, rel_path, base_rev):
-        """PUT /api/sync/file?folder=<id>&path=<path>&base_rev=<rev> - 上传文件"""
+    def _handle_sync_upload_file(self, folder_id, rel_path, base_rev, device=None):
+        """PUT /api/sync/file?folder=<id>&path=<path>&base_rev=<rev>&device=<d> - 上传文件"""
         if not folder_id or not rel_path:
             self._send_json({"error": "Missing folder or path"}, code=400)
             return
@@ -1999,7 +2029,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return data
 
         file_wrapper = LimitedFileWrapper(self.rfile, length)
-        success, error, new_rev = sync_store.write_file(folder_id, rel_path, file_wrapper, base_rev)
+        device = device or "host"
+        success, error, new_rev = sync_store.write_file(folder_id, rel_path, file_wrapper, base_rev, expected_length=length, device=device)
 
         if not success:
             if "Conflict" in error or "mismatch" in error:
@@ -2011,8 +2042,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         bump_version()
         self._send_json({"ok": True, "rev": new_rev})
 
-    def _handle_sync_delete_sync_file(self, folder_id, rel_path, base_rev):
-        """DELETE /api/sync/file?folder=<id>&path=<path>&base_rev=<rev> - 删除文件"""
+    def _handle_sync_delete_sync_file(self, folder_id, rel_path, base_rev, device=None):
+        """DELETE /api/sync/file?folder=<id>&path=<path>&base_rev=<rev>&device=<d> - 删除文件"""
         if not folder_id or not rel_path:
             self._send_json({"error": "Missing folder or path"}, code=400)
             return
@@ -2021,7 +2052,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             base_rev = None
 
-        success, error = sync_store.delete_file(folder_id, rel_path, base_rev)
+        device = device or "host"
+        success, error = sync_store.delete_file(folder_id, rel_path, base_rev, device)
 
         if not success:
             if "Conflict" in error or "mismatch" in error:

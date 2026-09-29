@@ -186,11 +186,14 @@ def write_file(
     folder_id: str,
     rel_path: str,
     file_obj,
-    base_rev: Optional[int] = None
+    base_rev: Optional[int] = None,
+    expected_length: Optional[int] = None,
+    device: str = "host"
 ) -> Tuple[bool, str, int]:
     """
     Write a file to a sync folder.
     Checks base_rev for conflict detection.
+    Validates complete upload with expected_length.
     Returns (success, error_message, new_rev).
     """
     with _sync_lock:
@@ -233,6 +236,10 @@ def write_file(
                 os.unlink(temp_path)
                 raise
 
+            if expected_length is not None and bytes_written != expected_length:
+                os.unlink(temp_path)
+                return False, f"Upload incomplete: expected {expected_length} bytes, got {bytes_written}", 0
+
             os.replace(temp_path, safe_path)
 
             file_size = os.path.getsize(safe_path)
@@ -248,7 +255,7 @@ def write_file(
                 "sha256": file_hash,
                 "rev": new_rev,
                 "deleted": False,
-                "device": "host"
+                "device": device
             }
 
             save_sync_metadata(metadata)
@@ -277,7 +284,7 @@ def read_file(folder_id: str, rel_path: str) -> Tuple[Optional[str], str]:
     return safe_path, ""
 
 
-def delete_file(folder_id: str, rel_path: str, base_rev: Optional[int] = None) -> Tuple[bool, str]:
+def delete_file(folder_id: str, rel_path: str, base_rev: Optional[int] = None, device: str = "host") -> Tuple[bool, str]:
     """
     Delete a file in a sync folder (mark as deleted in manifest).
     Returns (success, error_message).
@@ -312,7 +319,7 @@ def delete_file(folder_id: str, rel_path: str, base_rev: Optional[int] = None) -
             manifest[rel_path] = {
                 "deleted": True,
                 "rev": new_rev,
-                "device": "host",
+                "device": device,
                 "mtime": int(time.time())
             }
 
