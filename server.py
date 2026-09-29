@@ -94,6 +94,21 @@ def human_size(n):
     return f"{n:.1f} PB"
 
 
+def format_remaining(seconds):
+    if seconds <= 0:
+        return "即将清除"
+    days = int(seconds // 86400)
+    hours = int((seconds % 86400) // 3600)
+    minutes = int((seconds % 3600) // 60)
+    if days >= 1:
+        return f"{days}天{hours}小时后清除"
+    if hours >= 1:
+        return f"{hours}小时{minutes}分钟后清除"
+    if minutes >= 1:
+        return f"{minutes}分钟后清除"
+    return "即将清除"
+
+
 def get_lan_ip():
     """获取本机在局域网中的 IP 地址"""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -150,7 +165,7 @@ def online_count():
 
 def friendly_name_for(client_id):
     h = int(hashlib.md5(client_id.encode("utf-8")).hexdigest(), 16)
-    return "访客-" + ANIMAL_WORDS[h % len(ANIMAL_WORDS)]
+    return ANIMAL_WORDS[h % len(ANIMAL_WORDS)]
 
 
 def kind_for_ext(ext):
@@ -578,9 +593,14 @@ def render_file_item(entry, viewer_cid, is_host):
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
         '<path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14" stroke-linecap="round" stroke-linejoin="round"/></svg></a>'
     )
+    size_bytes = entry.get("size", 0)
+    expire_ts = uploaded_ts + ttl_days_for_size(size_bytes) * 86400
+    remaining = expire_ts - datetime.datetime.now().timestamp()
+    expiry_cls = "expiry soon" if 0 < remaining < 3600 else "expiry"
+    expiry_html = f'<span class="{expiry_cls}" data-expire="{expire_ts}">{format_remaining(remaining)}</span>'
     bubble_top = (
         f'<div class="file-bubble-top">{icon_html}<div class="fmeta"><div class="fname">{safe_name}</div>'
-        f'<div class="meta">{human_size(entry.get("size", 0))}</div></div></div>'
+        f'<div class="meta">{human_size(size_bytes)} · {expiry_html}</div></div></div>'
     )
     bubble = f'<div class="bubble file-bubble">{bubble_top}{preview_html}</div>'
     return (
@@ -738,6 +758,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .fname { overflow:hidden; color:#263249; font-size:14px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
   .tcontent { color:#263249; font-size:13.5px; line-height:1.65; white-space:pre-wrap; word-break:break-word; max-height:150px; overflow:auto; }
   .meta { color:var(--muted); font-size:11px; margin-top:4px; }
+  .expiry.soon { color:var(--danger); font-weight:650; }
+  li.msg.mine .bubble .expiry.soon { color:#ffd7d8; }
   .actions { display:flex; gap:6px; }
   li.msg.other .actions { justify-content:flex-start; }
   li.msg.mine .actions { justify-content:flex-end; }
@@ -943,6 +965,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
       .then(function (htmlStr) {
         feedEl.innerHTML = htmlStr;
         applySearch();
+        updateExpiryLabels();
         if (stick) scrollFeedToBottom();
       });
   }
@@ -950,8 +973,28 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   function refreshFavorites() {
     fetch('/favorites')
       .then(function (r) { return r.text(); })
-      .then(function (htmlStr) { favoritesList.innerHTML = htmlStr; });
+      .then(function (htmlStr) { favoritesList.innerHTML = htmlStr; updateExpiryLabels(); });
   }
+
+  function formatRemaining(seconds) {
+    if (seconds <= 0) return '即将清除';
+    var days = Math.floor(seconds / 86400);
+    var hours = Math.floor((seconds % 86400) / 3600);
+    var minutes = Math.floor((seconds % 3600) / 60);
+    if (days >= 1) return days + '天' + hours + '小时后清除';
+    if (hours >= 1) return hours + '小时' + minutes + '分钟后清除';
+    if (minutes >= 1) return minutes + '分钟后清除';
+    return '即将清除';
+  }
+  function updateExpiryLabels() {
+    var now = Date.now() / 1000;
+    document.querySelectorAll('.expiry[data-expire]').forEach(function (el) {
+      var remaining = parseFloat(el.getAttribute('data-expire')) - now;
+      el.textContent = formatRemaining(remaining);
+      el.classList.toggle('soon', remaining > 0 && remaining < 3600);
+    });
+  }
+  setInterval(updateExpiryLabels, 30000);
 
   tabs.forEach(function (tab) {
     tab.onclick = function () {
@@ -1046,6 +1089,23 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     mainEl.classList.remove('drag-over');
     if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
       uploadFiles(Array.prototype.slice.call(e.dataTransfer.files));
+    }
+  });
+
+  // 剪切板粘贴图片功能：在编辑区任何地方 Ctrl+V 粘贴图片
+  document.addEventListener('paste', function (e) {
+    if (!e.clipboardData || !e.clipboardData.items) return;
+    var files = [];
+    for (var i = 0; i < e.clipboardData.items.length; i++) {
+      var item = e.clipboardData.items[i];
+      if (item.kind === 'file') {
+        var file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      uploadFiles(files);
     }
   });
 
