@@ -6,3 +6,6 @@ __pycache__/
 shared/
 texts.json
 files.json
+sync.json
+synced/
+logs/

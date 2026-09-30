@@ -75,7 +75,8 @@ def test_sync():
     # 启动服务器
     server_process = subprocess.Popen(
         [sys.executable, "server.py", "8130"],
-        cwd=os.path.dirname(__file__),
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        env={**os.environ, "SFD_DATA_DIR": shared_dir},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )

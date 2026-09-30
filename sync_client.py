@@ -85,40 +85,33 @@ def save_state(root: str, state: Dict):
 
 def decide(local: Dict, remote: Dict, base: Dict, device_name: str) -> list:
     """
-    三方比较，返回操作列表
-    操作格式: ('upload' | 'download' | 'delete' | 'mkdir', path, 信息)
+    三方比较（local / remote / base），返回操作列表
+    操作: upload, download, delete_remote, delete_local, rename_upload, adopt, forget
     """
     actions = []
     local = local or {}
     remote = remote or {}
     base = base or {}
-    all_paths = set(local.keys()) | set(remote.keys()) | set(base.keys())
 
-    for path in sorted(all_paths):
+    for path in sorted(set(local) | set(remote) | set(base)):
         l = local.get(path, {})
         r = remote.get(path, {})
         b = base.get(path, {})
 
+        l_exists = bool(l)
+        r_exists = bool(r) and not r.get('deleted')
+        b_exists = bool(b)
         l_hash = l.get('sha256', '')
         r_hash = r.get('sha256', '')
         b_hash = b.get('sha256', '')
+        l_changed = not b_exists or l_hash != b_hash
+        r_changed = not b_exists or r_hash != b_hash
 
-        l_exists = bool(l)
-        r_exists = bool(r) and not r.get('deleted')
-        b_exists = bool(b) and not b.get('deleted')
-
-        if l_exists and r_exists and l_hash == r_hash:
-            continue
-        elif l_exists and not b_exists and not r_exists:
-            actions.append(('upload', path, l))
-        elif not l_exists and not b_exists and r_exists:
-            actions.append(('download', path, r))
-        elif l_exists and b_exists and not r_exists:
-            actions.append(('download', path, r))
-        elif not l_exists and b_exists and r_exists:
-            actions.append(('download', path, r))
-        elif l_exists and r_exists and l_hash != r_hash:
-            if l_hash != b_hash and r_hash != b_hash:
+        if l_exists and r_exists:
+            if l_hash == r_hash:
+                if b.get('rev') != r.get('rev'):
+                    actions.append(('adopt', path, r))
+            elif l_changed and r_changed:
                 timestamp = int(time.time())
                 parts = path.rsplit('.', 1)
                 if len(parts) == 2:
@@ -127,21 +120,24 @@ def decide(local: Dict, remote: Dict, base: Dict, device_name: str) -> list:
                     conflict_path = f"{path} (冲突 {device_name} {timestamp})"
                 actions.append(('rename_upload', path, conflict_path, l))
                 actions.append(('download', path, r))
-            elif l_hash != b_hash:
+            elif l_changed:
                 actions.append(('upload', path, l))
             else:
                 actions.append(('download', path, r))
-        elif l_exists and not b_exists and r_exists and l_hash != r_hash:
-            actions.append(('upload', path, l))
-        elif not l_exists and b_exists and r_exists:
-            actions.append(('download', path, r))
-
-    for path in sorted(base.keys()):
-        if path not in local and path in base:
-            if path in remote and not remote[path].get('deleted'):
-                actions.append(('delete_remote', path, base[path]))
-            elif path not in remote:
+        elif l_exists:
+            # 远端不存在或已删除
+            if b_exists and not l_changed:
                 actions.append(('delete_local', path))
+            else:
+                actions.append(('upload', path, l))
+        elif r_exists:
+            # 本地不存在
+            if b_exists and not r_changed:
+                actions.append(('delete_remote', path, b))
+            else:
+                actions.append(('download', path, r))
+        elif b_exists:
+            actions.append(('forget', path))
 
     return actions
 
@@ -188,7 +184,7 @@ def sync_once(server_url: str, folder_name: str, folder_id: str, local_dir: str,
             fullpath = os.path.join(local_dir, path)
             try:
                 with open(fullpath, 'rb') as f:
-                    url = f"{server_url}/api/sync/file?folder={folder_id}&path={urllib.parse.quote(path)}&base_rev={state.get(path, {}).get('rev', 0)}&device={device_name}"
+                    url = f"{server_url}/api/sync/file?folder={folder_id}&path={urllib.parse.quote(path)}&base_rev={remote.get(path, {}).get('rev', 0)}&device={device_name}"
                     ok, resp = http_request(url, 'PUT', data=f.read(), headers={'Content-Type': 'application/octet-stream'})
                     if ok:
                         new_rev = resp.get('rev', 0)
@@ -240,10 +236,32 @@ def sync_once(server_url: str, folder_name: str, folder_id: str, local_dir: str,
             except Exception as e:
                 print(f"下载异常: {path} - {e}")
 
+        elif action[0] == 'rename_upload':
+            path, conflict_path, info = action[1], action[2], action[3]
+            try:
+                os.replace(os.path.join(local_dir, path), os.path.join(local_dir, conflict_path))
+                url = f"{server_url}/api/sync/file?folder={folder_id}&path={urllib.parse.quote(conflict_path)}&base_rev=0&device={device_name}"
+                with open(os.path.join(local_dir, conflict_path), 'rb') as f:
+                    ok, resp = http_request(url, 'PUT', data=f.read(), headers={'Content-Type': 'application/octet-stream'})
+                if ok:
+                    state[conflict_path] = {'rev': resp.get('rev', 0), 'sha256': info['sha256'], 'mtime': info['mtime'], 'size': info['size']}
+                    print(f"冲突，本地版本另存为: {conflict_path}")
+                else:
+                    print(f"冲突副本上传失败: {conflict_path} - {resp}")
+            except Exception as e:
+                print(f"冲突处理异常: {path} - {e}")
+
+        elif action[0] == 'adopt':
+            path, info = action[1], action[2]
+            state[path] = {'rev': info.get('rev', 0), 'sha256': info.get('sha256', ''), 'mtime': info.get('mtime', 0), 'size': info.get('size', 0)}
+
+        elif action[0] == 'forget':
+            state.pop(path := action[1], None)
+
         elif action[0] == 'delete_remote':
             path, info = action[1], action[2]
             try:
-                url = f"{server_url}/api/sync/file?folder={folder_id}&path={urllib.parse.quote(path)}&base_rev={state.get(path, {}).get('rev', 0)}&device={device_name}"
+                url = f"{server_url}/api/sync/file?folder={folder_id}&path={urllib.parse.quote(path)}&base_rev={remote.get(path, {}).get('rev', 0)}&device={device_name}"
                 ok, resp = http_request(url, 'DELETE')
                 if ok:
                     state.pop(path, None)

@@ -13,9 +13,11 @@ import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
-SYNCED_DIR = "synced"
+# SFD_DATA_DIR 可指定数据目录（测试隔离用），默认沿用当前工作目录
+_DATA_DIR = os.environ.get("SFD_DATA_DIR", "")
+SYNCED_DIR = os.path.join(_DATA_DIR, "synced")
 TRASH_DIR = os.path.join(SYNCED_DIR, ".trash")
-SYNC_METADATA_FILE = "sync.json"
+SYNC_METADATA_FILE = os.path.join(_DATA_DIR, "sync.json")
 RETENTION_DAYS = 30
 
 _sync_lock = threading.RLock()
