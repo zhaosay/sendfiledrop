@@ -1,12 +1,14 @@
 """
 Folder sync storage backend for sendfiledrop.
 Manages synced folders, manifests, and file operations.
+元数据存在 sqlite（sync.db）：按行增量更新，不再整份重写 JSON。
 Zero-dependency, pure stdlib.
 """
 
 import os
 import json
 import hashlib
+import sqlite3
 import time
 import tempfile
 import threading
@@ -17,16 +19,79 @@ from typing import Optional, Dict, Any, Tuple
 _DATA_DIR = os.environ.get("SFD_DATA_DIR", "")
 SYNCED_DIR = os.path.join(_DATA_DIR, "synced")
 TRASH_DIR = os.path.join(SYNCED_DIR, ".trash")
-SYNC_METADATA_FILE = os.path.join(_DATA_DIR, "sync.json")
+SYNC_METADATA_FILE = os.path.join(_DATA_DIR, "sync.json")   # 旧版元数据，首次启动时自动导入 sqlite
+SYNC_DB_FILE = os.path.join(_DATA_DIR, "sync.db")
 RETENTION_DAYS = 30
 
 _sync_lock = threading.RLock()
+_conn: Optional[sqlite3.Connection] = None  # 单连接，所有访问都在 _sync_lock 下
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS folders (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, created INTEGER NOT NULL, next_rev INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS manifest (
+    folder_id TEXT NOT NULL, path TEXT NOT NULL,
+    size INTEGER, mtime INTEGER, sha256 TEXT,
+    rev INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, device TEXT,
+    PRIMARY KEY (folder_id, path)
+) WITHOUT ROWID;
+"""
 
 
 def ensure_dirs():
     """Create synced and trash directories if they don't exist."""
     os.makedirs(SYNCED_DIR, exist_ok=True)
     os.makedirs(TRASH_DIR, exist_ok=True)
+
+
+def _db() -> sqlite3.Connection:
+    """惰性打开数据库；首次创建时导入旧的 sync.json。调用方必须持有 _sync_lock。"""
+    global _conn
+    if _conn is None:
+        os.makedirs(os.path.dirname(os.path.abspath(SYNC_DB_FILE)), exist_ok=True)
+        conn = sqlite3.connect(SYNC_DB_FILE, check_same_thread=False, isolation_level=None)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.executescript(_SCHEMA)
+        _conn = conn
+        _migrate_legacy_json(conn)
+    return _conn
+
+
+def _migrate_legacy_json(conn: sqlite3.Connection):
+    """旧版把元数据放在 sync.json：在一个事务里导入，成功后改名为 sync.json.migrated 留作备份。"""
+    if not os.path.exists(SYNC_METADATA_FILE):
+        return
+    if conn.execute("SELECT 1 FROM folders LIMIT 1").fetchone() or conn.execute("SELECT 1 FROM meta LIMIT 1").fetchone():
+        return  # 数据库里已有数据，不覆盖
+    try:
+        with open(SYNC_METADATA_FILE, "r") as f:
+            data = json.load(f)
+        folders = data["folders"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return  # 旧文件损坏就保持原样，不动它
+    conn.execute("BEGIN")
+    try:
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('next_folder_id', ?)", (str(data.get("next_folder_id", 1)),))
+        for fid, info in folders.items():
+            conn.execute("INSERT INTO folders VALUES (?,?,?,?)",
+                         (fid, info["name"], int(info.get("created", 0)), int(info.get("next_rev", 1))))
+            conn.executemany(
+                "INSERT INTO manifest VALUES (?,?,?,?,?,?,?,?)",
+                [(fid, path, e.get("size"), e.get("mtime"), e.get("sha256"),
+                  int(e.get("rev", 0)), 1 if e.get("deleted") else 0, e.get("device"))
+                 for path, e in info.get("manifest", {}).items()],
+            )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    try:
+        os.replace(SYNC_METADATA_FILE, SYNC_METADATA_FILE + ".migrated")
+    except OSError:
+        pass
 
 
 def safe_join(base: str, rel: str) -> Optional[str]:
@@ -66,32 +131,10 @@ def sha256_file(path: str, chunk_size: int = 65536) -> str:
         return ""
 
 
-def load_sync_metadata() -> Dict[str, Any]:
-    """Load sync.json metadata."""
-    if not os.path.exists(SYNC_METADATA_FILE):
-        return {"folders": {}, "next_folder_id": 1}
-
-    try:
-        with open(SYNC_METADATA_FILE, 'r') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {"folders": {}, "next_folder_id": 1}
-
-
-def save_sync_metadata(metadata: Dict[str, Any]):
-    """Save sync.json metadata atomically."""
-    with _sync_lock:
-        temp_fd, temp_path = tempfile.mkstemp(dir=".", prefix=".sync_tmp_")
-        try:
-            with os.fdopen(temp_fd, 'w') as f:
-                json.dump(metadata, f, indent=2)
-            os.replace(temp_path, SYNC_METADATA_FILE)
-        except (IOError, OSError):
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-            raise
+def _row_to_entry(size, mtime, sha256, rev, deleted, device) -> Dict[str, Any]:
+    if deleted:
+        return {"deleted": True, "rev": rev, "device": device, "mtime": mtime}
+    return {"size": size, "mtime": mtime, "sha256": sha256, "rev": rev, "deleted": False, "device": device}
 
 
 def create_folder(name: str) -> Tuple[Optional[str], str]:
@@ -99,27 +142,23 @@ def create_folder(name: str) -> Tuple[Optional[str], str]:
     Create a new sync folder.
     Returns (folder_id, error_message).
     """
+    if not name or not isinstance(name, str) or len(name) > 255:
+        return None, "Invalid folder name"
     with _sync_lock:
         ensure_dirs()
-        metadata = load_sync_metadata()
-
-        if not name or not isinstance(name, str) or len(name) > 255:
-            return None, "Invalid folder name"
-
-        folder_id = f"folder_{metadata['next_folder_id']}"
-        metadata["next_folder_id"] += 1
-
-        folder_path = os.path.join(SYNCED_DIR, folder_id)
-        os.makedirs(folder_path, exist_ok=True)
-
-        metadata["folders"][folder_id] = {
-            "name": name,
-            "created": int(time.time()),
-            "manifest": {},
-            "next_rev": 1
-        }
-
-        save_sync_metadata(metadata)
+        db = _db()
+        row = db.execute("SELECT value FROM meta WHERE key='next_folder_id'").fetchone()
+        next_id = int(row[0]) if row else 1
+        folder_id = f"folder_{next_id}"
+        os.makedirs(os.path.join(SYNCED_DIR, folder_id), exist_ok=True)
+        db.execute("BEGIN")
+        try:
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('next_folder_id', ?)", (str(next_id + 1),))
+            db.execute("INSERT INTO folders VALUES (?,?,?,1)", (folder_id, name, int(time.time())))
+            db.execute("COMMIT")
+        except Exception:
+            db.execute("ROLLBACK")
+            raise
         return folder_id, ""
 
 
@@ -129,59 +168,81 @@ def delete_folder(folder_id: str) -> str:
     Returns error message or "" on success.
     """
     with _sync_lock:
-        metadata = load_sync_metadata()
-
-        if folder_id not in metadata["folders"]:
+        db = _db()
+        if not db.execute("SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone():
             return "Folder not found"
 
         folder_path = os.path.join(SYNCED_DIR, folder_id)
         trash_path = os.path.join(TRASH_DIR, f"{folder_id}_{int(time.time())}")
-
         try:
+            ensure_dirs()
             if os.path.exists(folder_path):
                 os.rename(folder_path, trash_path)
-
-            del metadata["folders"][folder_id]
-            save_sync_metadata(metadata)
+            db.execute("BEGIN")
+            try:
+                db.execute("DELETE FROM manifest WHERE folder_id=?", (folder_id,))
+                db.execute("DELETE FROM folders WHERE id=?", (folder_id,))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
             return ""
-        except (OSError, IOError) as e:
+        except (OSError, IOError, sqlite3.Error) as e:
             return f"Failed to delete folder: {e}"
 
 
 def get_folders() -> Dict[str, Dict[str, Any]]:
     """Get list of all sync folders with stats."""
-    metadata = load_sync_metadata()
-    result = {}
-
-    for folder_id, info in metadata["folders"].items():
-        manifest = info.get("manifest", {})
-        file_count = len([f for f in manifest.values() if not f.get("deleted")])
-
-        result[folder_id] = {
-            "name": info["name"],
-            "created": info["created"],
-            "file_count": file_count,
-            "last_modified": max(
-                [f.get("mtime", 0) for f in manifest.values()],
-                default=info["created"]
-            )
+    with _sync_lock:
+        rows = _db().execute(
+            """SELECT f.id, f.name, f.created,
+                      COALESCE(SUM(CASE WHEN m.deleted=0 THEN 1 ELSE 0 END), 0),
+                      MAX(f.created, COALESCE(MAX(m.mtime), 0))
+               FROM folders f LEFT JOIN manifest m ON m.folder_id = f.id
+               GROUP BY f.id ORDER BY f.rowid"""
+        ).fetchall()
+        return {
+            fid: {"name": name, "created": created, "file_count": count, "last_modified": last}
+            for fid, name, created, count, last in rows
         }
-
-    return result
 
 
 def get_manifest(folder_id: str) -> Tuple[Optional[Dict], str]:
     """
-    Get folder manifest.
+    Get folder manifest (a snapshot, safe to serialize while others write).
     Returns (manifest_dict, error_message).
     Manifest format: {path: {size, mtime, sha256, rev, deleted, device}}
     """
-    metadata = load_sync_metadata()
+    with _sync_lock:
+        db = _db()
+        if not db.execute("SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone():
+            return None, "Folder not found"
+        rows = db.execute(
+            "SELECT path, size, mtime, sha256, rev, deleted, device FROM manifest WHERE folder_id=?", (folder_id,)
+        ).fetchall()
+        return {path: _row_to_entry(*rest) for path, *rest in rows}, ""
 
-    if folder_id not in metadata["folders"]:
-        return None, "Folder not found"
 
-    return metadata["folders"][folder_id].get("manifest", {}), ""
+def _current_rev(db: sqlite3.Connection, folder_id: str, rel_path: str) -> int:
+    row = db.execute("SELECT rev FROM manifest WHERE folder_id=? AND path=?", (folder_id, rel_path)).fetchone()
+    return row[0] if row else 0
+
+
+def _commit_entry(db: sqlite3.Connection, folder_id: str, rel_path: str, size, mtime, sha256, deleted: bool, device: str) -> int:
+    """在事务里分配新 rev 并写入 manifest 一行，返回新 rev。"""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        new_rev = db.execute("SELECT next_rev FROM folders WHERE id=?", (folder_id,)).fetchone()[0]
+        db.execute("UPDATE folders SET next_rev=? WHERE id=?", (new_rev + 1, folder_id))
+        db.execute(
+            "INSERT OR REPLACE INTO manifest VALUES (?,?,?,?,?,?,?,?)",
+            (folder_id, rel_path, size, mtime, sha256, new_rev, 1 if deleted else 0, device),
+        )
+        db.execute("COMMIT")
+        return new_rev
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
 
 
 def write_file(
@@ -197,74 +258,67 @@ def write_file(
     Checks base_rev for conflict detection.
     Validates complete upload with expected_length.
     Returns (success, error_message, new_rev).
+
+    慢的部分（接收请求体、算 sha256）都在锁外完成，锁里只做冲突检查和提交，
+    一个慢客户端不会阻塞其他人同步。
     """
+    # 先快速检查一遍：有冲突就不必浪费带宽去收文件
     with _sync_lock:
         ensure_dirs()
-        metadata = load_sync_metadata()
-
-        if folder_id not in metadata["folders"]:
+        db = _db()
+        if not db.execute("SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone():
             return False, "Folder not found", 0
-
-        folder_path = os.path.join(SYNCED_DIR, folder_id)
-        safe_path = safe_join(folder_path, rel_path)
-
+        safe_path = safe_join(os.path.join(SYNCED_DIR, folder_id), rel_path)
         if not safe_path:
             return False, "Invalid path", 0
-
-        folder_info = metadata["folders"][folder_id]
-        manifest = folder_info.get("manifest", {})
-
-        entry = manifest.get(rel_path, {})
-        current_rev = entry.get("rev", 0)
-
+        current_rev = _current_rev(db, folder_id, rel_path)
         if base_rev is not None and base_rev != current_rev:
             return False, "Conflict: base revision mismatch", current_rev
 
-        try:
-            os.makedirs(os.path.dirname(safe_path), exist_ok=True)
+    temp_path = None
+    try:
+        os.makedirs(os.path.dirname(safe_path), exist_ok=True)
+        temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(safe_path), prefix=".sfd_upload_")
+        digest = hashlib.sha256()
+        bytes_written = 0
+        with os.fdopen(temp_fd, "wb") as out:   # 带缓冲的文件对象，不会出现 os.write 短写
+            while True:
+                chunk = file_obj.read(65536)
+                if not chunk:
+                    break
+                out.write(chunk)
+                digest.update(chunk)
+                bytes_written += len(chunk)
 
-            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(safe_path))
-            try:
-                bytes_written = 0
-                while True:
-                    chunk = file_obj.read(65536)
-                    if not chunk:
-                        break
-                    os.write(temp_fd, chunk)
-                    bytes_written += len(chunk)
-                os.close(temp_fd)
-            except Exception:
-                os.close(temp_fd)
+        if expected_length is not None and bytes_written != expected_length:
+            os.unlink(temp_path)
+            return False, f"Upload incomplete: expected {expected_length} bytes, got {bytes_written}", 0
+        os.chmod(temp_path, 0o644)
+
+        with _sync_lock:
+            db = _db()
+            if not db.execute("SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone():
                 os.unlink(temp_path)
-                raise
+                return False, "Folder not found", 0
+            current_rev = _current_rev(db, folder_id, rel_path)
+            if base_rev is not None and base_rev != current_rev:
+                os.unlink(temp_path)   # 接收期间别人已经提交了新版本
+                return False, "Conflict: base revision mismatch", current_rev
 
-            if expected_length is not None and bytes_written != expected_length:
-                os.unlink(temp_path)
-                return False, f"Upload incomplete: expected {expected_length} bytes, got {bytes_written}", 0
-
+            file_mtime = int(os.path.getmtime(temp_path))
             os.replace(temp_path, safe_path)
-
-            file_size = os.path.getsize(safe_path)
-            file_mtime = int(os.path.getmtime(safe_path))
-            file_hash = sha256_file(safe_path)
-
-            new_rev = folder_info.get("next_rev", 1)
-            folder_info["next_rev"] = new_rev + 1
-
-            manifest[rel_path] = {
-                "size": file_size,
-                "mtime": file_mtime,
-                "sha256": file_hash,
-                "rev": new_rev,
-                "deleted": False,
-                "device": device
-            }
-
-            save_sync_metadata(metadata)
+            temp_path = None
+            new_rev = _commit_entry(db, folder_id, rel_path, bytes_written, file_mtime, digest.hexdigest(), False, device)
             return True, "", new_rev
 
-        except (OSError, IOError) as e:
-            return False, f"Failed to write file: {e}", 0
+    except (OSError, IOError, sqlite3.Error) as e:
+        return False, f"Failed to write file: {e}", 0
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 def read_file(folder_id: str, rel_path: str) -> Tuple[Optional[str], str]:
@@ -272,14 +326,13 @@ def read_file(folder_id: str, rel_path: str) -> Tuple[Optional[str], str]:
     Get absolute path to a file in a sync folder (for reading).
     Returns (file_path, error_message).
     """
-    metadata = load_sync_metadata()
+    with _sync_lock:
+        known = _db().execute("SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone()
 
-    if folder_id not in metadata["folders"]:
+    if not known:
         return None, "Folder not found"
 
-    folder_path = os.path.join(SYNCED_DIR, folder_id)
-    safe_path = safe_join(folder_path, rel_path)
-
+    safe_path = safe_join(os.path.join(SYNCED_DIR, folder_id), rel_path)
     if not safe_path or not os.path.isfile(safe_path):
         return None, "File not found"
 
@@ -292,43 +345,23 @@ def delete_file(folder_id: str, rel_path: str, base_rev: Optional[int] = None, d
     Returns (success, error_message).
     """
     with _sync_lock:
-        metadata = load_sync_metadata()
-
-        if folder_id not in metadata["folders"]:
+        db = _db()
+        if not db.execute("SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone():
             return False, "Folder not found"
 
-        folder_path = os.path.join(SYNCED_DIR, folder_id)
-        safe_path = safe_join(folder_path, rel_path)
-
+        safe_path = safe_join(os.path.join(SYNCED_DIR, folder_id), rel_path)
         if not safe_path:
             return False, "Invalid path"
 
-        folder_info = metadata["folders"][folder_id]
-        manifest = folder_info.get("manifest", {})
-        entry = manifest.get(rel_path, {})
-        current_rev = entry.get("rev", 0)
-
-        if base_rev is not None and base_rev != current_rev:
+        if base_rev is not None and base_rev != _current_rev(db, folder_id, rel_path):
             return False, "Conflict: base revision mismatch"
 
         try:
             if os.path.exists(safe_path):
                 os.unlink(safe_path)
-
-            new_rev = folder_info.get("next_rev", 1)
-            folder_info["next_rev"] = new_rev + 1
-
-            manifest[rel_path] = {
-                "deleted": True,
-                "rev": new_rev,
-                "device": device,
-                "mtime": int(time.time())
-            }
-
-            save_sync_metadata(metadata)
+            _commit_entry(db, folder_id, rel_path, None, int(time.time()), None, True, device)
             return True, ""
-
-        except (OSError, IOError) as e:
+        except (OSError, IOError, sqlite3.Error) as e:
             return False, f"Failed to delete file: {e}"
 
 

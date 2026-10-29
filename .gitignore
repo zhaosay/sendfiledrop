@@ -7,5 +7,8 @@ shared/
 texts.json
 files.json
 sync.json
+sync.json.migrated
+sync.db
+sync.db-*
 synced/
 logs/

@@ -18,10 +18,11 @@ import urllib.error
 import urllib.parse
 import argparse
 import tempfile
+import shutil
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-AGENT_VERSION = "0.3.0"
+AGENT_VERSION = "0.3.1"
 PROTOCOL = 1
 
 def sha256_file(path: str) -> str:
@@ -141,14 +142,36 @@ def decide(local: Dict, remote: Dict, base: Dict, device_name: str) -> list:
 
     return actions
 
-def http_request(url: str, method: str = 'GET', data: bytes = None, headers: dict = None) -> Tuple[bool, dict]:
+class _LimitedReader:
+    """只读前 size 字节：上传途中文件被追加内容时，也不会发出比 Content-Length 更多的数据。"""
+    def __init__(self, f, size: int):
+        self.f, self.remaining = f, size
+
+    def read(self, n: int = 65536) -> bytes:
+        if self.remaining <= 0:
+            return b""
+        chunk = self.f.read(min(n, self.remaining))
+        self.remaining -= len(chunk)
+        return chunk
+
+
+def put_file(url: str, fullpath: str) -> Tuple[bool, dict]:
+    """流式上传本地文件（不整个读进内存）；超时是每次 socket 读写的空闲时间，不是总时长。"""
+    size = os.path.getsize(fullpath)
+    with open(fullpath, 'rb') as f:
+        return http_request(url, 'PUT', data=_LimitedReader(f, size),
+                            headers={'Content-Type': 'application/octet-stream', 'Content-Length': str(size)},
+                            timeout=60)
+
+
+def http_request(url: str, method: str = 'GET', data=None, headers: dict = None, timeout: int = 10) -> Tuple[bool, dict]:
     """执行 HTTP 请求，返回 (成功, 数据/错误)"""
     try:
         req = urllib.request.Request(url, data=data, method=method)
         if headers:
             for k, v in headers.items():
                 req.add_header(k, v)
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             if r.status >= 400:
                 return False, {'error': f"HTTP {r.status}"}
             try:
@@ -183,15 +206,14 @@ def sync_once(server_url: str, folder_name: str, folder_id: str, local_dir: str,
             path, info = action[1], action[2]
             fullpath = os.path.join(local_dir, path)
             try:
-                with open(fullpath, 'rb') as f:
-                    url = f"{server_url}/api/sync/file?folder={folder_id}&path={urllib.parse.quote(path)}&base_rev={remote.get(path, {}).get('rev', 0)}&device={device_name}"
-                    ok, resp = http_request(url, 'PUT', data=f.read(), headers={'Content-Type': 'application/octet-stream'})
-                    if ok:
-                        new_rev = resp.get('rev', 0)
-                        state[path] = {'rev': new_rev, 'sha256': info['sha256'], 'mtime': info['mtime'], 'size': info['size']}
-                        print(f"上传: {path}")
-                    else:
-                        print(f"上传失败: {path} - {resp}")
+                url = f"{server_url}/api/sync/file?folder={folder_id}&path={urllib.parse.quote(path)}&base_rev={remote.get(path, {}).get('rev', 0)}&device={device_name}"
+                ok, resp = put_file(url, fullpath)
+                if ok:
+                    new_rev = resp.get('rev', 0)
+                    state[path] = {'rev': new_rev, 'sha256': info['sha256'], 'mtime': info['mtime'], 'size': info['size']}
+                    print(f"上传: {path}")
+                else:
+                    print(f"上传失败: {path} - {resp}")
             except Exception as e:
                 print(f"上传异常: {path} - {e}")
 
@@ -207,27 +229,17 @@ def sync_once(server_url: str, folder_name: str, folder_id: str, local_dir: str,
 
                 url = f"{server_url}/api/sync/file?folder={folder_id}&path={urllib.parse.quote(path)}"
                 req = urllib.request.Request(url)
-                with urllib.request.urlopen(req, timeout=10) as r:
+                with urllib.request.urlopen(req, timeout=60) as r:
                     temp_fd, temp_path = tempfile.mkstemp(dir=dirpath)
                     try:
-                        bytes_written = 0
-                        while True:
-                            chunk = r.read(65536)
-                            if not chunk:
-                                break
-                            os.write(temp_fd, chunk)
-                            bytes_written += len(chunk)
-                        os.close(temp_fd)
+                        with os.fdopen(temp_fd, 'wb') as out:  # fdopen 接管 fd：带缓冲，且不会短写
+                            shutil.copyfileobj(r, out, 65536)
                         os.replace(temp_path, fullpath)
                         if 'mtime' in info:
                             os.utime(fullpath, (info['mtime'], info['mtime']))
                         state[path] = {'rev': info.get('rev', 0), 'sha256': info.get('sha256', ''), 'mtime': info.get('mtime', 0), 'size': info.get('size', 0)}
                         print(f"下载: {path}")
                     except Exception as e:
-                        try:
-                            os.close(temp_fd)
-                        except:
-                            pass
                         try:
                             os.unlink(temp_path)
                         except:
@@ -241,8 +253,7 @@ def sync_once(server_url: str, folder_name: str, folder_id: str, local_dir: str,
             try:
                 os.replace(os.path.join(local_dir, path), os.path.join(local_dir, conflict_path))
                 url = f"{server_url}/api/sync/file?folder={folder_id}&path={urllib.parse.quote(conflict_path)}&base_rev=0&device={device_name}"
-                with open(os.path.join(local_dir, conflict_path), 'rb') as f:
-                    ok, resp = http_request(url, 'PUT', data=f.read(), headers={'Content-Type': 'application/octet-stream'})
+                ok, resp = put_file(url, os.path.join(local_dir, conflict_path))
                 if ok:
                     state[conflict_path] = {'rev': resp.get('rev', 0), 'sha256': info['sha256'], 'mtime': info['mtime'], 'size': info['size']}
                     print(f"冲突，本地版本另存为: {conflict_path}")
@@ -292,8 +303,15 @@ def main():
     parser.add_argument('--dir', required=True, help='本地目录路径')
     parser.add_argument('--once', action='store_true', help='运行一次后退出')
     parser.add_argument('--device', default=None, help='设备名称（默认自动生成）')
+    parser.add_argument('--passcode', default=os.environ.get('SFD_PASSCODE', ''),
+                        help='服务器设置了访问口令时填写（也可用环境变量 SFD_PASSCODE）')
 
     args = parser.parse_args()
+
+    if args.passcode:
+        opener = urllib.request.build_opener()
+        opener.addheaders = [('X-SFD-Passcode', args.passcode)]
+        urllib.request.install_opener(opener)
 
     if not os.path.isdir(args.dir):
         print(f"错误：目录不存在 {args.dir}")
