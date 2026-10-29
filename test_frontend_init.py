@@ -114,6 +114,12 @@ assert.equal(typeof element('sendBtn').onclick, 'function');
   assert.equal(lightbox.children[0].src, '/view/a.png');
   lightbox.onclick({target: lightbox});
   assert.equal(element('body').children.length, 1, 'stub remove() does not detach, but the handler must not throw');
+  const mainPane = element('.main');
+  assert.equal(mainPane.classList.contains('filters-collapsed'), true, 'Filter bar must start collapsed by default');
+  element('filterToggle').onclick();
+  assert.equal(mainPane.classList.contains('filters-collapsed'), false, 'Toggle must expand the mobile filter bar');
+  element('filterToggle').onclick();
+  assert.equal(mainPane.classList.contains('filters-collapsed'), true, 'Toggle must collapse it again');
   console.log('Upload initialization, draft, send, and retry checks passed');
 })().catch(error => {console.error(error); process.exitCode = 1});
 """

@@ -206,6 +206,7 @@
     return qs;
   }
   function refreshFeed(forceBottom, anchorBottom) {
+    updateFilterSummary();
     var stick = forceBottom || isFeedNearBottom();
     fetch('/feed?' + feedQuery())
       .then(function (r) { return r.text(); })
@@ -307,6 +308,36 @@
     };
   });
   if (timeTabs.length > 0) timeTabs[0].classList.add('active');
+
+  // 手机顶部筛选栏可折叠：折叠后把空间让给聊天区，顶部显示当前筛选摘要，状态记在本机浏览器里
+  var filterToggle = document.getElementById('filterToggle');
+  var filterSummary = document.getElementById('filterSummary');
+  var mainPane = document.querySelector('.main');
+  var filtersCollapsed = true;  // 默认折叠；只有用户手动展开过（存了 '0'）才保持展开
+  try { filtersCollapsed = localStorage.getItem('sfd_filters_collapsed') !== '0'; } catch (e) {}
+  var FILTER_LABELS = { text: '文字', media: '多媒体', file: '文件' };
+  var TIME_LABELS = { today: '今天', week: '本周', month: '本月' };
+  function updateFilterSummary() {
+    var parts = [FILTER_LABELS[currentFilter] || '全部'];
+    if (TIME_LABELS[currentTimeFilter]) parts.push(TIME_LABELS[currentTimeFilter]);
+    if (currentSenderFilter) parts.push(currentSenderFilter);
+    if (currentSearch.trim()) parts.push('搜索“' + currentSearch.trim() + '”');
+    filterSummary.textContent = parts.join(' · ');
+  }
+  function applyFiltersCollapsed() {
+    mainPane.classList.toggle('filters-collapsed', filtersCollapsed);
+    var label = filtersCollapsed ? '展开筛选栏' : '折叠筛选栏';
+    filterToggle.setAttribute('aria-expanded', String(!filtersCollapsed));
+    filterToggle.setAttribute('aria-label', label);
+    filterToggle.setAttribute('title', label);
+  }
+  filterToggle.onclick = function () {
+    filtersCollapsed = !filtersCollapsed;
+    try { localStorage.setItem('sfd_filters_collapsed', filtersCollapsed ? '1' : '0'); } catch (e) {}
+    applyFiltersCollapsed();
+  };
+  applyFiltersCollapsed();
+  updateFilterSummary();
 
   var audioCtx = null;
   function beep() {

@@ -51,8 +51,12 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16" stroke-linecap="round"/></svg>
       </button>
       <span class="mobile-brand">SendFileDrop</span>
+      <span id="filterSummary" class="filter-summary" aria-live="polite"></span>
+      <button id="filterToggle" class="zh-btn filter-toggle" type="button" aria-controls="filterBar" aria-expanded="true" aria-label="折叠筛选栏" title="折叠筛选栏">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 15 6-6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
     </div>
-    <div class="filter-bar">
+    <div id="filterBar" class="filter-bar">
       <div class="content-filters" role="group" aria-label="内容类型">
       <button class="zh-btn tab active" data-tab="all">全部</button>
       <button class="zh-btn tab" data-tab="text">文字列表</button>
