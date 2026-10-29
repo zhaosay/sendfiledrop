@@ -206,3 +206,9 @@ li.msg { display: flex; flex-direction: column; gap: var(--zh-space-2); }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }
 
 .feed-more { display: flex; justify-content: center; padding: var(--zh-space-3, 12px) 0; }
+
+/* 图片双击放大预览 */
+.media-thumb img { cursor: zoom-in; }
+.lightbox { position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center; padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); background: rgba(0, 0, 0, .86); cursor: zoom-out; }
+.lightbox img { max-width: 96vw; max-height: 90vh; object-fit: contain; border-radius: var(--zh-radius-sm); box-shadow: 0 8px 40px rgba(0, 0, 0, .5); cursor: default; }
+.lightbox-close { position: absolute; top: calc(12px + env(safe-area-inset-top)); right: 16px; }

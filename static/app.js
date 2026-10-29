@@ -554,6 +554,65 @@
   feedEl.addEventListener('click', handleListClick);
   favoritesList.addEventListener('click', handleListClick);
 
+  // 双击（手机上双击轻点）缩略图，放大预览原图；点击空白处、按 Esc 或点关闭按钮退出
+  var lightboxEl = null;
+  function closeLightbox() {
+    if (!lightboxEl) return;
+    lightboxEl.remove();
+    lightboxEl = null;
+    document.removeEventListener('keydown', onLightboxKey);
+  }
+  function onLightboxKey(e) { if (e.key === 'Escape') closeLightbox(); }
+  function openLightbox(src, alt) {
+    closeLightbox();
+    lightboxEl = document.createElement('div');
+    lightboxEl.className = 'lightbox';
+    lightboxEl.setAttribute('role', 'dialog');
+    lightboxEl.setAttribute('aria-label', '图片预览');
+    var img = document.createElement('img');
+    img.src = src;
+    img.alt = alt || '';
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'zh-btn lightbox-close';
+    close.textContent = '关闭';
+    close.setAttribute('aria-label', '关闭预览');
+    lightboxEl.appendChild(img);
+    lightboxEl.appendChild(close);
+    lightboxEl.onclick = function (e) { if (e.target !== img) closeLightbox(); };
+    document.body.appendChild(lightboxEl);
+    document.addEventListener('keydown', onLightboxKey);
+  }
+  function thumbOf(e) {
+    var t = e.target && e.target.closest ? e.target.closest('.media-thumb img') : null;
+    return t || null;
+  }
+  function onThumbDblClick(e) {
+    var img = thumbOf(e);
+    if (!img) return;
+    e.preventDefault();
+    openLightbox(img.getAttribute('src'), img.getAttribute('alt'));
+  }
+  feedEl.addEventListener('dblclick', onThumbDblClick);
+  favoritesList.addEventListener('dblclick', onThumbDblClick);
+  // 触屏不一定触发 dblclick，用 touchend 间隔自己判断双击
+  var lastTap = { el: null, time: 0 };
+  function onThumbTap(e) {
+    var img = thumbOf(e);
+    if (!img) { lastTap.el = null; return; }
+    var now = Date.now();
+    if (lastTap.el === img && now - lastTap.time < 350) {
+      lastTap.el = null;
+      e.preventDefault();
+      openLightbox(img.getAttribute('src'), img.getAttribute('alt'));
+    } else {
+      lastTap.el = img;
+      lastTap.time = now;
+    }
+  }
+  feedEl.addEventListener('touchend', onThumbTap);
+  favoritesList.addEventListener('touchend', onThumbTap);
+
   reshareInput.onchange = function () {
     var f = reshareInput.files[0];
     reshareInput.value = '';

@@ -42,7 +42,8 @@ const context = {
     title: 'sendfiledrop', documentElement: element('root'),
     getElementById: element, querySelector: element,
     createElement() {return element('created-' + elements.size)},
-    querySelectorAll() {return []}, addEventListener() {}
+    querySelectorAll() {return []}, addEventListener() {}, removeEventListener() {},
+    body: element('body')
   },
   window: {
     innerHeight: 800, addEventListener() {},
@@ -101,6 +102,18 @@ assert.equal(typeof element('sendBtn').onclick, 'function');
   await element('sendBtn').onclick();
   assert.equal(uploads, 3, 'Failed files must remain available for retry');
   assert.equal(element('sendBtn').disabled, false);
+  const img = {getAttribute: name => name === 'src' ? '/view/a.png' : 'a.png'};
+  const onThumb = {closest: selector => selector === '.media-thumb img' ? img : null};
+  const elsewhere = {closest: () => null};
+  element('feed').listeners.dblclick({target: elsewhere, preventDefault() {}});
+  assert.equal(element('body').children.length, 0, 'Double-clicking outside a thumbnail must not open a preview');
+  element('feed').listeners.dblclick({target: onThumb, preventDefault() {}});
+  assert.equal(element('body').children.length, 1, 'Double-clicking a thumbnail must open the preview');
+  const lightbox = element('body').children[0];
+  assert.equal(lightbox.className, 'lightbox');
+  assert.equal(lightbox.children[0].src, '/view/a.png');
+  lightbox.onclick({target: lightbox});
+  assert.equal(element('body').children.length, 1, 'stub remove() does not detach, but the handler must not throw');
   console.log('Upload initialization, draft, send, and retry checks passed');
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
