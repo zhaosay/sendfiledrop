@@ -70,6 +70,56 @@ python3 sync_client.py http://HOST:8000 --folder FOLDER_NAME --dir /path/to/loca
 
 Add `--once` to run one synchronization pass. The client records revisions and creates conflict copies when both sides have changed.
 
+
+### Interface and everyday workflows
+
+- **Timeline:** text and files appear in one chronological feed. Your own entries appear on the right, and entries from other devices appear on the left.
+- **Find an item:** search message text or filenames, select a sender, and combine content-type filters with today, this week, or this month.
+- **Mobile layout:** the sidebar contains search, nicknames, favorites, recent senders, and the connection QR code. The top filter bar can be collapsed, and its state is saved in the browser.
+- **Image preview:** double-click an image thumbnail, or double-tap it on a touch screen. Click outside the image, press Escape, or choose Close to dismiss the preview.
+- **Favorites:** select the star on an entry to add it to the sidebar. Favorites are associated with the current browser device.
+- **Devices and notifications:** each browser receives an editable nickname. The page shows online devices and can signal new content with a sound and a flashing title.
+- **Deletion:** a device can delete its own entries. The host has additional controls, including clearing text messages.
+- **Themes:** choose light, dark, or system appearance. The preference is saved in the browser.
+
+The built-in QR generator and bundled ZhaoUI CSS and JavaScript do not require a network connection. Image recognition runs locally on macOS. The optional AI actions depend on the local integration described above.
+
+### Project structure
+
+```text
+server.py       HTTP routes, static assets, access checks, and long polling
+config.py       Port, data directory, limits, and environment settings
+store.py        Text and file records, presence, and expiration
+render.py       Timeline items and page template rendering
+uploads.py      Streaming multipart upload parser
+sync_store.py   SQLite-backed folder synchronization records
+sync_client.py  Folder synchronization client
+ocr.swift       macOS Vision image-text recognition
+qr.py           Offline QR code generator
+templates/      HTML page template
+static/         Frontend scripts, styles, and bundled ZhaoUI assets
+启动.command    macOS launch script
+使用说明.md     Detailed Chinese usage guide
+```
+
+At runtime, the data directory contains `shared/`, `texts.json`, `files.json`, and synchronization data such as `sync.db`. The old `sync.json` format is imported into SQLite when appropriate, with a migrated copy retained.
+
+### Troubleshooting
+
+- **Other devices cannot connect:** check that they can reach the host on the same network, use the LAN address printed by the server, and check the host firewall and selected port.
+- **Port 8000 is in use:** start the server on another port, for example `python3 server.py 9000`, and use that port on the other device.
+- **Image recognition fails:** check that the image has not expired, is at most 20 MB, and that Swift and Apple Vision are available on the macOS host.
+- **AI processing is unavailable:** check the local endpoint, model, and scheduler state described under Requirements. Retry when the configured AI service is available.
+- **macOS blocks the launcher:** inspect the message in Privacy & Security and use the normal macOS controls to allow the script if you trust it.
+
+### Version history
+
+- **v0.3.3-dev** adds the collapsible mobile filter bar and remembers its state.
+- **v0.3.2-dev** adds enlarged image previews.
+- **v0.3.1-dev** improves streaming uploads, limits, pagination, long polling, SQLite synchronization records, and access controls.
+- **v0.2.0** adds image paste, sender filtering, time filters, and interface updates.
+- **v0.1.0** introduces the shared timeline, file retention, favorites, and search.
+
 ### Security and data
 
 The server listens on the local network and uses plain HTTP. By default, devices that can reach it can access shared content. A passcode restricts access but does not encrypt traffic. Use a trusted network and avoid exposing the port directly to the public internet. Runtime data, including `shared/`, message records, sync data, and logs, is excluded by `.gitignore`.
@@ -152,6 +202,56 @@ python3 sync_client.py http://HOST:8000 --folder FOLDER_NAME --dir /path/to/loca
 ```
 
 添加 `--once` 可只执行一次同步。客户端会记录版本，并在两端均有修改时创建冲突副本。
+
+
+### 界面和日常使用
+
+- **时间线：**文字和文件按时间显示在同一个列表中，自己的内容显示在右侧，其他设备的内容显示在左侧。
+- **查找内容：**可以搜索文字或文件名，选择发送者，并结合内容类型以及今天、本周、本月筛选。
+- **手机界面：**侧栏集中显示搜索、昵称、收藏、最近活跃设备和连接二维码。顶部筛选栏可以折叠，状态会保存在浏览器中。
+- **图片预览：**双击图片缩略图，触屏设备可双击轻点。点击图片外区域、按 Esc 或选择关闭即可退出。
+- **收藏：**点击记录旁的星形按钮，内容会出现在侧栏收藏列表中。收藏与当前浏览器设备关联。
+- **设备和通知：**每个浏览器都有可修改的昵称。页面显示在线设备数量，并可通过提示音和标题闪烁提示新内容。
+- **删除：**设备可以删除自己发送的记录。主机本机还有清空文字消息等管理操作。
+- **主题：**可以选择浅色、深色或跟随系统，偏好保存在浏览器中。
+
+内置二维码生成器和 ZhaoUI 的 CSS、JavaScript 运行时不需要联网。图片识别在 macOS 本机运行，AI 内容处理需要满足上文所列的本地集成条件。
+
+### 项目结构
+
+```text
+server.py       HTTP 路由、静态资源、访问校验和长轮询
+config.py       端口、数据目录、限制和环境配置
+store.py        文字与文件记录、在线状态和过期清理
+render.py       时间线记录和页面模板渲染
+uploads.py      流式 multipart 上传解析
+sync_store.py   基于 SQLite 的文件夹同步记录
+sync_client.py  文件夹同步客户端
+ocr.swift       macOS Vision 图片文字识别
+qr.py           离线二维码生成器
+templates/      HTML 页面模板
+static/         前端脚本、样式和内置 ZhaoUI 资源
+启动.command    macOS 启动脚本
+使用说明.md     中文详细使用说明
+```
+
+运行时，数据目录包含 `shared/`、`texts.json`、`files.json` 和 `sync.db` 等同步数据。符合迁移条件的旧版 `sync.json` 会导入 SQLite，并保留迁移后的副本。
+
+### 常见问题
+
+- **其他设备无法连接：**检查设备是否能在同一网络中访问主机，使用服务打印的局域网地址，并检查主机防火墙和端口。
+- **8000 端口被占用：**可以运行 `python3 server.py 9000`，然后在其他设备上使用新的端口。
+- **图片识别失败：**检查图片是否已过期、大小是否不超过 20 MB，以及 macOS 主机是否具备 Swift 和 Apple Vision。
+- **AI 内容处理不可用：**检查环境要求中列出的本地接口、模型和调度状态，待已配置的 AI 服务可用后重试。
+- **macOS 阻止启动脚本：**检查「隐私与安全性」中的提示，并在确认信任脚本后使用系统提供的选项。
+
+### 版本历史
+
+- **v0.3.3-dev** 增加可折叠的手机顶部筛选栏，并记住折叠状态。
+- **v0.3.2-dev** 增加图片放大预览。
+- **v0.3.1-dev** 改进流式上传、大小限制、分页、长轮询、SQLite 同步记录和访问控制。
+- **v0.2.0** 增加粘贴图片、发送者筛选、时间筛选和界面更新。
+- **v0.1.0** 首次提供共享时间线、文件保留规则、收藏和搜索。
 
 ### 安全与数据
 
