@@ -12,6 +12,7 @@ import sqlite3
 import time
 import tempfile
 import threading
+import unicodedata
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
@@ -100,7 +101,7 @@ def safe_join(base: str, rel: str) -> Optional[str]:
     Rejects absolute paths, .., and symlink escapes.
     Returns None if path is unsafe.
     """
-    if not base or not rel:
+    if not base or not rel or rel.startswith("/") or "\\" in rel or any(part in ("", ".", "..") for part in rel.split("/")):
         return None
 
     base_path = Path(base).resolve()
@@ -228,6 +229,12 @@ def _current_rev(db: sqlite3.Connection, folder_id: str, rel_path: str) -> int:
     return row[0] if row else 0
 
 
+def _path_conflict(db, folder_id, rel_path):
+    key = unicodedata.normalize("NFC", rel_path).casefold()
+    rows = db.execute("SELECT path FROM manifest WHERE folder_id=?", (folder_id,))
+    return any(path != rel_path and unicodedata.normalize("NFC", path).casefold() == key for (path,) in rows)
+
+
 def _commit_entry(db: sqlite3.Connection, folder_id: str, rel_path: str, size, mtime, sha256, deleted: bool, device: str) -> int:
     """在事务里分配新 rev 并写入 manifest 一行，返回新 rev。"""
     db.execute("BEGIN IMMEDIATE")
@@ -271,6 +278,8 @@ def write_file(
         safe_path = safe_join(os.path.join(SYNCED_DIR, folder_id), rel_path)
         if not safe_path:
             return False, "Invalid path", 0
+        if _path_conflict(db, folder_id, rel_path):
+            return False, "Conflict: path aliases an existing file", 0
         current_rev = _current_rev(db, folder_id, rel_path)
         if base_rev is not None and base_rev != current_rev:
             return False, "Conflict: base revision mismatch", current_rev
@@ -301,14 +310,30 @@ def write_file(
                 os.unlink(temp_path)
                 return False, "Folder not found", 0
             current_rev = _current_rev(db, folder_id, rel_path)
+            if _path_conflict(db, folder_id, rel_path):
+                return False, "Conflict: path aliases an existing file", current_rev
             if base_rev is not None and base_rev != current_rev:
                 os.unlink(temp_path)   # 接收期间别人已经提交了新版本
                 return False, "Conflict: base revision mismatch", current_rev
 
             file_mtime = int(os.path.getmtime(temp_path))
-            os.replace(temp_path, safe_path)
-            temp_path = None
-            new_rev = _commit_entry(db, folder_id, rel_path, bytes_written, file_mtime, digest.hexdigest(), False, device)
+            backup_path = None
+            if os.path.exists(safe_path):
+                fd, backup_path = tempfile.mkstemp(dir=os.path.dirname(safe_path), prefix=".sfd_backup_")
+                os.close(fd)
+                os.replace(safe_path, backup_path)
+            try:
+                os.replace(temp_path, safe_path)
+                temp_path = None
+                new_rev = _commit_entry(db, folder_id, rel_path, bytes_written, file_mtime, digest.hexdigest(), False, device)
+            except Exception:
+                if backup_path:
+                    os.replace(backup_path, safe_path)
+                elif os.path.exists(safe_path):
+                    os.unlink(safe_path)
+                raise
+            if backup_path:
+                os.unlink(backup_path)
             return True, "", new_rev
 
     except (OSError, IOError, sqlite3.Error) as e:
@@ -327,16 +352,14 @@ def read_file(folder_id: str, rel_path: str) -> Tuple[Optional[str], str]:
     Returns (file_path, error_message).
     """
     with _sync_lock:
-        known = _db().execute("SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone()
-
-    if not known:
-        return None, "Folder not found"
-
-    safe_path = safe_join(os.path.join(SYNCED_DIR, folder_id), rel_path)
-    if not safe_path or not os.path.isfile(safe_path):
-        return None, "File not found"
-
-    return safe_path, ""
+        db = _db()
+        entry = db.execute("SELECT sha256, deleted FROM manifest WHERE folder_id=? AND path=?", (folder_id, rel_path)).fetchone()
+        safe_path = safe_join(os.path.join(SYNCED_DIR, folder_id), rel_path)
+        if not entry or entry[1] or not safe_path or not os.path.isfile(safe_path):
+            return None, "File not found"
+        if sha256_file(safe_path) != entry[0]:
+            return None, "File content does not match manifest"
+        return safe_path, ""
 
 
 def delete_file(folder_id: str, rel_path: str, base_rev: Optional[int] = None, device: str = "host") -> Tuple[bool, str]:
@@ -352,14 +375,26 @@ def delete_file(folder_id: str, rel_path: str, base_rev: Optional[int] = None, d
         safe_path = safe_join(os.path.join(SYNCED_DIR, folder_id), rel_path)
         if not safe_path:
             return False, "Invalid path"
+        if _path_conflict(db, folder_id, rel_path):
+            return False, "Conflict: path aliases an existing file"
 
         if base_rev is not None and base_rev != _current_rev(db, folder_id, rel_path):
             return False, "Conflict: base revision mismatch"
 
         try:
+            backup_path = None
             if os.path.exists(safe_path):
-                os.unlink(safe_path)
-            _commit_entry(db, folder_id, rel_path, None, int(time.time()), None, True, device)
+                fd, backup_path = tempfile.mkstemp(dir=os.path.dirname(safe_path), prefix=".sfd_backup_")
+                os.close(fd)
+                os.replace(safe_path, backup_path)
+            try:
+                _commit_entry(db, folder_id, rel_path, None, int(time.time()), None, True, device)
+            except Exception:
+                if backup_path:
+                    os.replace(backup_path, safe_path)
+                raise
+            if backup_path:
+                os.unlink(backup_path)
             return True, ""
         except (OSError, IOError, sqlite3.Error) as e:
             return False, f"Failed to delete file: {e}"

@@ -67,6 +67,8 @@ ONLINE_WINDOW_SECONDS = 14         # 心跳窗口：这段时间内有请求就�
 
 FEED_PAGE_SIZE = 200               # 列表每页条数，更早的内容点"加载更多"
 
+MAX_TEXT_CHARS = 20_000
+
 
 MAX_UPLOAD_BYTES = int(os.environ.get("SFD_MAX_UPLOAD_BYTES", 10 * 1024 ** 3))  # 单次上传上限，默认 10GB
 

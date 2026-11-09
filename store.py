@@ -105,13 +105,21 @@ def kind_for_ext(ext):
     return "file"
 
 
+class HistoryReadError(RuntimeError):
+    pass
+
+
 def _read_json_list(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, list) else []
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return []
+    except (OSError, ValueError) as exc:
+        raise HistoryReadError(os.path.basename(path)) from exc
+    if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+        raise HistoryReadError(os.path.basename(path))
+    return data
 
 
 def _write_json_atomic(path, data):
@@ -137,9 +145,13 @@ def save_texts(items):
         _texts_cache = items
 
 
-def add_text(content, sender, client_id):
+def add_text(content, sender, client_id, request_id=None):
     with _texts_lock:
         items = load_texts()
+        if request_id:
+            for item in items:
+                if item.get("client_id") == client_id and item.get("request_id") == request_id:
+                    return item["content"] == content
         items.append({
             "id": uuid.uuid4().hex,
             "content": content,
@@ -147,9 +159,11 @@ def add_text(content, sender, client_id):
             "sender": sender,
             "client_id": client_id,
             "starred_by": [],
+            **({"request_id": request_id} if request_id else {}),
         })
         save_texts(items)
     bump_version()
+    return True
 
 
 def delete_text(text_id, client_id, is_host):
@@ -172,6 +186,7 @@ def delete_text(text_id, client_id, is_host):
 
 def clear_texts():
     with _texts_lock:
+        load_texts()
         save_texts([])
     bump_version()
 
@@ -250,23 +265,38 @@ def safe_share_path(name):
     return path
 
 
-def _dedup_path(name):
+def _dedup_path(name, items):
     """调用方必须持有 _files_lock，选名和落盘才是原子的。"""
     dest = os.path.join(SHARE_DIR, name)
     base, ext = os.path.splitext(name)
     i = 1
-    while os.path.exists(dest):
+    reserved = {it["name"] for it in items if not it.get("purged") or it.get("purge_pending")}
+    while os.path.lexists(dest) or os.path.basename(dest) in reserved:
         dest = os.path.join(SHARE_DIR, f"{base}({i}){ext}")
         i += 1
     return dest
 
 
-def add_file(original_filename, tmp_path, size, sender, client_id):
+def add_file(original_filename, tmp_path, size, sender, client_id, request_id=None):
     """把已写好的临时文件落成共享文件并登记。tmp_path 必须在 SHARE_DIR 同一文件系统内。"""
     safe = clean_filename(original_filename)
     now = datetime.datetime.now().timestamp()
     with _files_lock:
-        dest = _dedup_path(safe)
+        items = load_files()
+        digest = None
+        if request_id:
+            hasher = hashlib.sha256()
+            with open(tmp_path, "rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            digest = hasher.hexdigest()
+            for item in items:
+                if item.get("client_id") == client_id and item.get("request_id") == request_id:
+                    if item.get("upload_sha256") != digest or item.get("original_filename") != original_filename:
+                        raise ValueError("发送请求编号已用于其他文件")
+                    os.remove(tmp_path)
+                    return item
+        dest = _dedup_path(safe, items)
         os.replace(tmp_path, dest)
         final_name = os.path.basename(dest)
         ext = os.path.splitext(final_name)[1].lower().lstrip(".")
@@ -282,8 +312,8 @@ def add_file(original_filename, tmp_path, size, sender, client_id):
             "purged": False,
             "purged_ts": None,
             "starred_by": [],
+            **({"request_id": request_id, "upload_sha256": digest, "original_filename": original_filename} if request_id else {}),
         }
-        items = load_files()
         items.append(entry)
         try:
             save_files(items)
@@ -297,15 +327,37 @@ def add_file(original_filename, tmp_path, size, sender, client_id):
     return entry
 
 
-def touch_file_access(name):
-    """只改内存里的 last_seen_ts，落盘交给清理线程批量做，避免每次下载/播放都重写 files.json。"""
+def open_shared_file(name, touch=False):
+    """在锁内检查记录并打开文件，避免清理与下载打开不同版本。"""
     global _files_dirty
     with _files_lock:
         for it in load_files():
-            if it.get("name") == name and not it.get("purged"):
-                it["last_seen_ts"] = datetime.datetime.now().timestamp()
+            if it.get("name") != name or it.get("purged"):
+                continue
+            now = datetime.datetime.now().timestamp()
+            if now - it.get("uploaded_ts", now) >= ttl_days_for_size(it.get("size", 0)) * 86400:
+                return None
+            path = safe_share_path(name)
+            if not path or not os.path.isfile(path):
+                return None
+            try:
+                stream = open(path, "rb")
+            except FileNotFoundError:
+                return None
+            if touch:
+                it["last_seen_ts"] = now
                 _files_dirty = True
-                break
+            return stream
+    return None
+
+
+def _remove_shared_file(name):
+    if not safe_share_path(name):
+        raise OSError("Invalid shared file path")
+    try:
+        os.remove(os.path.join(SHARE_DIR, name))
+    except FileNotFoundError:
+        pass
 
 
 def delete_file(entry_id, client_id, is_host):
@@ -320,15 +372,13 @@ def delete_file(entry_id, client_id, is_host):
             return "notfound"
         if not is_host and target.get("client_id") != client_id:
             return "forbidden"
-        fpath = None if target.get("purged") else os.path.join(SHARE_DIR, target["name"])
-        items = [it for it in items if it.get("id") != entry_id]
-        save_files(items)
-    if fpath:
-        try:
-            if os.path.isfile(fpath):
-                os.remove(fpath)
-        except OSError:
-            pass
+        save_files([it for it in items if it is not target])
+        if not target.get("purged") or target.get("purge_pending"):
+            try:
+                _remove_shared_file(target["name"])
+            except OSError:
+                save_files(items)
+                raise
     bump_version()
     return "ok"
 
@@ -338,17 +388,20 @@ def reshare_file(entry_id, tmp_path, size, sender, client_id):
     with _files_lock:
         items = load_files()
         target = None
-        for it in items:
+        for index, it in enumerate(items):
             if it.get("id") == entry_id:
                 target = it
                 break
         if target is None or not target.get("purged"):
             return None
-        dest = _dedup_path(target["name"])
+        if target.get("purge_pending"):
+            _remove_shared_file(target["name"])
+        dest = _dedup_path(target["name"], (it for it in items if it is not target))
         os.replace(tmp_path, dest)
         final_name = os.path.basename(dest)
         now = datetime.datetime.now().timestamp()
-        target.update({
+        restored = {
+            **target,
             "name": final_name,
             "size": size,
             "uploaded_ts": now,
@@ -357,10 +410,16 @@ def reshare_file(entry_id, tmp_path, size, sender, client_id):
             "client_id": client_id,
             "purged": False,
             "purged_ts": None,
-        })
-        save_files(items)
+        }
+        restored.pop("purge_pending", None)
+        items[index] = restored
+        try:
+            save_files(items)
+        except OSError:
+            os.replace(dest, tmp_path)
+            raise
     bump_version()
-    return target
+    return restored
 
 
 def toggle_star_file(entry_id, client_id):
@@ -392,35 +451,29 @@ def ttl_days_for_size(size):
 def sweep_once():
     now = datetime.datetime.now().timestamp()
     changed = False
-    to_remove = []
     with _files_lock:
-        items = load_files()
+        items = [dict(it) for it in load_files()]
         keep = []
         for it in items:
-            if not it.get("purged"):
-                ttl_days = ttl_days_for_size(it.get("size", 0))
-                if now - it.get("uploaded_ts", now) >= ttl_days * 86400:
-                    to_remove.append(os.path.join(SHARE_DIR, it.get("name", "")))
-                    it["purged"] = True
-                    it["purged_ts"] = now
-                    changed = True
-                keep.append(it)
-            else:
-                if now - (it.get("purged_ts") or now) >= GHOST_RETENTION_DAYS * 86400:
-                    changed = True
+            if not it.get("purged") and now - it.get("uploaded_ts", now) >= ttl_days_for_size(it.get("size", 0)) * 86400:
+                it.update(purged=True, purged_ts=now, purge_pending=True)
+                changed = True
+            if it.get("purge_pending"):
+                try:
+                    _remove_shared_file(it["name"])
+                except OSError:
+                    keep.append(it)
                     continue
-                keep.append(it)
+                it.pop("purge_pending")
+                changed = True
+            if it.get("purged") and now - (it.get("purged_ts") or now) >= GHOST_RETENTION_DAYS * 86400:
+                changed = True
+                continue
+            keep.append(it)
         if changed:
             save_files(keep)
         else:
             flush_files_if_dirty()
-    # 删大文件可能很慢，放到锁外做，避免阻塞上传和列表
-    for fpath in to_remove:
-        try:
-            if os.path.isfile(fpath):
-                os.remove(fpath)
-        except OSError:
-            pass
     if changed:
         bump_version()
 

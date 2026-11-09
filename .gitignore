@@ -12,3 +12,4 @@ sync.db
 sync.db-*
 synced/
 logs/
+studio-primary.json

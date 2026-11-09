@@ -17,7 +17,7 @@
       <span class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.6a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 20h.01M2 9a14.4 14.4 0 0 1 20 0" stroke-linecap="round"/></svg></span>
       <span>SendFileDrop</span>
       <button class="zh-btn text sidebar-close" aria-label="关闭侧栏" data-zh-close>关闭</button>
-    </div><div class="online-pill"><span class="dot"></span><span id="onlineCount">1</span> 台在线</div></div>
+    </div><div class="online-pill"><span class="dot"></span><span id="onlineCount">1 台在线</span><span id="connectionStatus" role="status" hidden></span></div></div>
     <input id="searchInput" class="zh-input search-input" aria-label="搜索文件名或文字" placeholder="搜索文件名 / 文字…">
     <div class="sidebar-tools">
       <button id="nicknamePill" class="zh-btn nickname-pill" title="点击修改昵称"></button>
@@ -77,14 +77,24 @@
     <footer class="composer">
       <div id="pendingFiles" class="pending-files" aria-label="待发送文件"></div>
       <div id="uploadQueue" class="upload-queue" aria-live="polite"></div>
+      <div class="ai-tools">
+        <label for="aiAction">AI 内容处理</label>
+        <select id="aiAction" class="zh-input"><option value="organize">整理文字</option><option value="links">提取链接</option><option value="translate">翻译成中文</option></select>
+        <button id="aiProcess" class="zh-btn" type="button">处理输入框内容</button>
+      </div>
+      <section id="aiResultPanel" class="ai-result" hidden aria-label="处理结果">
+        <label for="aiResult">处理结果</label>
+        <textarea id="aiResult" class="zh-textarea" rows="4"></textarea>
+        <div><button id="aiUseResult" class="zh-btn" type="button">放入输入框</button><button id="aiCopyResult" class="zh-btn" type="button">复制结果</button><button id="aiCloseResult" class="zh-btn" type="button">关闭</button></div>
+      </section>
       <div class="composer-row">
         <button id="attachBtn" class="zh-btn attach-btn" title="发送文件" aria-label="发送文件">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.5 12.5 21a5 5 0 0 1-7-7L14 5.5a3.5 3.5 0 0 1 5 5L10.5 19a2 2 0 0 1-3-3L15 8.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
-        <textarea class="zh-textarea" aria-label="消息或文件说明" id="textInput" rows="1" placeholder="输入文字，或拖入文件…"></textarea>
+        <textarea class="zh-textarea" aria-label="消息或文件说明（最多 __MAX_TEXT_CHARS__ 字符）" id="textInput" data-max-chars="__MAX_TEXT_CHARS__" rows="1" enterkeyhint="enter" placeholder="输入文字，或拖入文件…"></textarea>
         <button id="sendBtn" class="zh-btn primary send-btn">发送</button>
       </div>
-      <div class="composer-hint"><span>拖入文件或粘贴图片，确认后发送</span><span>Enter 发送 · Shift + Enter 换行</span></div>
+      <div class="composer-hint"><span>文字最多 __MAX_TEXT_CHARS__ 字符 · 拖入文件或粘贴图片</span><span>Enter 换行 · 点击发送按钮发送</span></div>
       <input id="fileInput" type="file" multiple style="display:none">
       <input id="reshareInput" type="file" style="display:none">
     </footer>

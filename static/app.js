@@ -18,6 +18,51 @@
   applyTheme();
 
   function showError(text) { ZhaoUI.message(text, {type: 'error', duration: 4500}); }
+
+  function responseError(body, fallback) {
+    try {
+      var error = JSON.parse(body).error;
+      if (typeof error === 'string' && error) return error;
+    } catch (err) {}
+    return fallback;
+  }
+
+  async function requireOk(response, fallback) {
+    if (!response.ok) {
+      var error = new Error(responseError(await response.text(), fallback));
+      error.status = response.status;
+      throw error;
+    }
+    return response;
+  }
+
+  async function copyToClipboard(text, container) {
+    if (window.isSecureContext && navigator.clipboard) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch (err) {
+        // Try the selection-based copy when the browser denies clipboard access.
+      }
+    }
+
+    var previousFocus = document.activeElement;
+    var field = document.createElement('textarea');
+    field.value = text;
+    field.readOnly = true;
+    field.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
+    container.appendChild(field);
+    try {
+      field.focus({preventScroll: true});
+      field.select();
+      field.setSelectionRange(0, field.value.length);
+      if (!document.execCommand('copy')) throw new Error('Copy failed');
+    } finally {
+      field.remove();
+      if (previousFocus) previousFocus.focus({preventScroll: true});
+    }
+  }
+
   // VisualViewport also tracks the space left above the mobile keyboard.
   function setVh() {
     var viewport = window.visualViewport;
@@ -44,6 +89,50 @@
   var tabs = document.querySelectorAll('.tab');
   var searchInput = document.getElementById('searchInput');
   var textInput = document.getElementById('textInput');
+  var aiResultPanel = document.getElementById('aiResultPanel');
+  var aiResult = document.getElementById('aiResult');
+  var aiProcess = document.getElementById('aiProcess');
+  var aiAction = document.getElementById('aiAction');
+
+  async function runTool(button, path, data) {
+    button.disabled = true;
+    try {
+      var response = await fetch(path, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data)
+      });
+      await requireOk(response, '处理失败，请稍后重试');
+      var result = await response.json();
+      aiResult.value = result.text;
+      aiResultPanel.hidden = false;
+      if (!result.text) ZhaoUI.message('未识别到文字');
+    } catch (err) {
+      showError(err.message || '处理失败，请稍后重试');
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  aiProcess.onclick = function () {
+    if (!textInput.value.trim()) { showError('请先在输入框中填写文字'); return; }
+    runTool(aiProcess, '/tools/ai', {action: aiAction.value, text: textInput.value});
+  };
+  document.getElementById('aiUseResult').onclick = async function () {
+    if (textInput.value && textInput.value !== aiResult.value &&
+        !await ZhaoUI.dialog({title: '替换输入框内容？', content: '当前输入框内容会被处理结果替换。', ok: '替换'})) return;
+    textInput.value = aiResult.value;
+    textInput.dispatchEvent(new Event('input'));
+    textInput.focus();
+  };
+  document.getElementById('aiCopyResult').onclick = async function () {
+    try {
+      await copyToClipboard(aiResult.value, document.body);
+      ZhaoUI.message('结果已复制', {type: 'success'});
+    } catch (err) { showError('复制失败，请手动选择结果复制'); }
+  };
+  document.getElementById('aiCloseResult').onclick = function () { aiResultPanel.hidden = true; };
+  var maxTextChars = Number(textInput.dataset.maxChars);
   var sendBtn = document.getElementById('sendBtn');
   var attachBtn = document.getElementById('attachBtn');
   var fileInput = document.getElementById('fileInput');
@@ -51,8 +140,11 @@
   var uploadQueue = document.getElementById('uploadQueue');
   var pendingFilesEl = document.getElementById('pendingFiles');
   var pendingFiles = [];
+  var uploadErrors = new WeakMap();
+  var uploadRequestIds = new WeakMap();
   var sending = false;
   var onlineCountEl = document.getElementById('onlineCount');
+  var connectionStatus = document.getElementById('connectionStatus');
   var nicknamePill = document.getElementById('nicknamePill');
   var clearTextsBtn = document.getElementById('clearTexts');
   var menuToggle = document.getElementById('menuToggle');
@@ -102,6 +194,8 @@
   var currentSearch = '';
   var currentTimeFilter = 'all';
   var lastVersion = null;
+  var feedRequest = 0;
+  var renderedFeedRequest = 0;
   var FEED_PAGE = 200;
   var feedLimit = FEED_PAGE;
   var pendingReshareId = null;
@@ -155,28 +249,14 @@
     }
   }
 
-  function applySearch() {
-    var q = currentSearch.trim().toLowerCase();
-    var items = feedEl.querySelectorAll('li[data-search]');
-    var minTime = getTimeRange(currentTimeFilter);
-    var rowNumber = 0;
-    items.forEach(function (li) {
-      var s = li.getAttribute('data-search') || '';
-      var sender = li.querySelector('.msg-meta');
-      var senderName = sender ? sender.textContent.split(' · ')[0] : '';
-      var meta = li.getAttribute('data-meta') || '';
-      var ts = parseFloat(meta) || 0;
-      var matchSearch = !q || s.indexOf(q) !== -1;
-      var matchSender = !currentSenderFilter || senderName.indexOf(currentSenderFilter) !== -1;
-      var matchTime = currentTimeFilter === 'all' || ts >= minTime;
-      li.style.display = (matchSearch && matchSender && matchTime) ? '' : 'none';
-      if (li.style.display !== 'none' && sender) sender.setAttribute('data-row-number', ++rowNumber);
+  function numberFeedRows() {
+    feedEl.querySelectorAll('.msg .msg-meta').forEach(function (sender, index) {
+      sender.setAttribute('data-row-number', index + 1);
     });
   }
   var searchTimer = null;
   searchInput.oninput = function () {
     currentSearch = searchInput.value;
-    applySearch();  // 先在已加载的内容里即时过滤，再等服务端给出完整结果
     clearTimeout(searchTimer);
     searchTimer = setTimeout(function () { feedLimit = FEED_PAGE; refreshFeed(currentFilter === 'all' || currentFilter === 'text'); }, 250);
   };
@@ -190,7 +270,7 @@
   function renderFeed(htmlStr, stick, anchorBottom) {
     var prevHeight = feedEl.scrollHeight, prevTop = feedEl.scrollTop;
     feedEl.innerHTML = htmlStr;
-    applySearch();
+    numberFeedRows();
     updateExpiryLabels();
     if (stick) scrollFeedToBottom();
     else if (anchorBottom) feedEl.scrollTop = prevTop + (feedEl.scrollHeight - prevHeight);
@@ -208,17 +288,30 @@
   function refreshFeed(forceBottom, anchorBottom) {
     updateFilterSummary();
     var stick = forceBottom || isFeedNearBottom();
-    fetch('/feed?' + feedQuery())
+    var query = feedQuery();
+    var request = ++feedRequest;
+    return fetch('/feed?' + query)
+      .then(function (r) { return requireOk(r, '消息加载失败'); })
       .then(function (r) { return r.text(); })
-      .then(function (htmlStr) { renderFeed(htmlStr, stick, anchorBottom); });
+      .then(function (htmlStr) { renderCurrentFeed(query, request, htmlStr, stick, anchorBottom); })
+      .catch(function (err) { if (request === feedRequest) showError(err.message); });
+  }
+
+  function renderCurrentFeed(query, request, htmlStr, stick, anchorBottom) {
+    if (query !== feedQuery() || request < renderedFeedRequest) return;
+    renderFeed(htmlStr, stick, anchorBottom);
+    renderedFeedRequest = request;
   }
   // 版本变化后一次请求拿齐 feed / 收藏 / 发送者
   function refreshAll() {
     var stick = isFeedNearBottom();
-    return fetch('/bundle?' + feedQuery())
+    var query = feedQuery();
+    var request = ++feedRequest;
+    return fetch('/bundle?' + query)
+      .then(function (r) { return requireOk(r, '消息加载失败'); })
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        renderFeed(data.feed, stick, false);
+        renderCurrentFeed(query, request, data.feed, stick, false);
         favoritesList.innerHTML = data.favorites;
         updateExpiryLabels();
         renderSenders(data.senders);
@@ -227,8 +320,10 @@
 
   function refreshFavorites() {
     fetch('/favorites')
+      .then(function (r) { return requireOk(r, '收藏加载失败'); })
       .then(function (r) { return r.text(); })
-      .then(function (htmlStr) { favoritesList.innerHTML = htmlStr; updateExpiryLabels(); });
+      .then(function (htmlStr) { favoritesList.innerHTML = htmlStr; updateExpiryLabels(); })
+      .catch(function (err) { showError(err.message); });
   }
 
   function renderSenders(senders) {
@@ -365,21 +460,29 @@
   }
 
   // 长轮询：服务端在没有新内容时挂起请求，有变化立刻返回，空闲时几乎没有流量
-  function poll() {
-    var url = '/status' + (lastVersion === null ? '' : '?since=' + lastVersion);
-    fetch(url).then(function (r) { return r.json(); }).then(function (data) {
-      onlineCountEl.textContent = data.online;
-      var changed = lastVersion !== null && data.version !== lastVersion;
-      lastVersion = data.version;
-      if (changed) {
-        notifyNewContent();
-        refreshAll().catch(function () {});
+  async function poll() {
+    try {
+      var url = '/status' + (lastVersion === null ? '' : '?since=' + lastVersion);
+      var response = await requireOk(await fetch(url), '连接失败');
+      var data = await response.json();
+      if (data.version !== lastVersion) {
+        await refreshAll();
+        if (lastVersion !== null) notifyNewContent();
+        lastVersion = data.version;
       }
+      onlineCountEl.textContent = data.online + ' 台在线';
+      onlineCountEl.hidden = false;
+      connectionStatus.hidden = true;
       setTimeout(poll, 0);
-    }).catch(function () { setTimeout(poll, 3000); });
+    } catch (err) {
+      onlineCountEl.hidden = true;
+      connectionStatus.hidden = false;
+      connectionStatus.textContent = err.status === 503 ? err.message : '同步中断，正在重试';
+      setTimeout(poll, 3000);
+    }
   }
   scrollFeedToBottom();
-  applySearch();
+  numberFeedRows();
   window.addEventListener('load', scrollFeedToBottom);
   refreshSenders();
   poll();
@@ -398,7 +501,10 @@
       number.textContent = index + 1;
       var name = document.createElement('span');
       name.className = 'name';
-      name.textContent = file.name + ' · 待发送';
+      name.textContent = file.name;
+      var state = document.createElement('span');
+      state.className = 'pending-state';
+      state.textContent = uploadErrors.get(file) || '待发送';
       var remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'zh-btn text sm';
@@ -408,6 +514,7 @@
       row.appendChild(number);
       row.appendChild(name);
       row.appendChild(remove);
+      row.appendChild(state);
       pendingFilesEl.appendChild(row);
     });
   }
@@ -415,20 +522,37 @@
     pendingFiles = pendingFiles.concat(files);
     renderPendingFiles();
   }
+  var textAttempt = null;
   async function doSendText() {
     if (sending) return;
     var val = textInput.value;
     if (!val.trim() && !pendingFiles.length) return;
+    if (val.trim() && Array.from(val).length > maxTextChars) {
+      showError('文字最多 ' + maxTextChars + ' 字符，请缩短后再发送');
+      return;
+    }
     sending = true;
     sendBtn.disabled = true;
     try {
       if (val.trim()) {
+        if (!textAttempt || textAttempt.content !== val) {
+          var bytes = crypto.getRandomValues(new Uint8Array(16));
+          textAttempt = {
+            content: val,
+            id: Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, '0'); }).join('')
+          };
+        }
         var res = await fetch('/text', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8', 'X-Nickname': nicknameHeader() },
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+            'X-Nickname': nicknameHeader(),
+            'X-SFD-Request-ID': textAttempt.id
+          },
           body: 'content=' + encodeURIComponent(val)
         });
-        if (!res.ok) throw new Error('发送失败');
+        await requireOk(res, '发送失败，请重试');
+        textAttempt = null;
         if (textInput.value === val) { textInput.value = ''; textInput.style.height = ''; }
         refreshFeed(true);
       }
@@ -438,16 +562,13 @@
       var failed = await uploadFiles(files);
       if (failed.length) { queueFiles(failed); showError('部分文件发送失败，已保留在待发送列表，可重试'); }
     } catch (e) {
-      showError('发送失败，请重试');
+      showError(e.message || '发送失败，请重试');
     } finally {
       sending = false;
       sendBtn.disabled = false;
     }
   }
   sendBtn.onclick = doSendText;
-  textInput.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSendText(); }
-  });
   textInput.addEventListener('input', function () {
     textInput.style.height = 'auto';
     textInput.style.height = Math.min(textInput.scrollHeight, 200) + 'px';
@@ -499,8 +620,14 @@
   async function uploadFiles(files) {
     var failed = [];
     for (var i = 0; i < files.length; i++) {
-      var ok = await new Promise(function (resolve) { uploadOne(files[i], resolve); });
-      if (!ok) failed.push(files[i]);
+      var file = files[i];
+      var error = await new Promise(function (resolve) { uploadOne(file, resolve); });
+      if (error) {
+        uploadErrors.set(file, error);
+        failed.push(file);
+      } else {
+        uploadErrors.delete(file);
+      }
     }
     refreshFeed(true);
     return failed;
@@ -518,6 +645,11 @@
     var xhr = new XMLHttpRequest();
     xhr.open('POST', '/upload');
     xhr.setRequestHeader('X-Nickname', nicknameHeader());
+    if (!uploadRequestIds.has(f)) {
+      var random = crypto.getRandomValues(new Uint8Array(16));
+      uploadRequestIds.set(f, Array.from(random, function (byte) { return byte.toString(16).padStart(2, '0'); }).join(''));
+    }
+    xhr.setRequestHeader('X-SFD-Request-ID', uploadRequestIds.get(f));
     xhr.upload.onprogress = function (e) {
       if (e.lengthComputable) {
         var p = Math.round(e.loaded / e.total * 100);
@@ -525,16 +657,26 @@
         state.textContent = p + '%';
       }
     };
-    xhr.onload = function () {
-      state.textContent = (xhr.status >= 200 && xhr.status < 400) ? '完成' : '失败';
+    function finish(error) {
+      state.textContent = error || '完成';
       setTimeout(function () { row.remove(); }, 900);
-      done(xhr.status >= 200 && xhr.status < 400);
+      done(error);
+    }
+    xhr.onload = function () {
+      if (xhr.status >= 200 && xhr.status < 300) finish(null);
+      else finish(responseError(xhr.responseText, '上传失败（HTTP ' + xhr.status + '）'));
     };
-    xhr.onerror = function () { state.textContent = '失败'; setTimeout(function () { row.remove(); }, 900); done(false); };
+    xhr.onerror = xhr.onabort = function () { finish('上传中断，请重试'); };
     xhr.send(fd);
   }
 
   async function handleListClick(e) {
+    var ocrBtn = e.target.closest('.ocr-btn');
+    if (ocrBtn) {
+      if (e.currentTarget === favoritesList && window.innerWidth <= 720) closeDrawer();
+      await runTool(ocrBtn, '/tools/ocr', {name: ocrBtn.getAttribute('data-name')});
+      return;
+    }
     if (e.target.closest('[data-load-more]')) {
       feedLimit += FEED_PAGE;
       refreshFeed(false, currentFilter === 'all' || currentFilter === 'text');
@@ -557,9 +699,14 @@
     var copyBtn = e.target.closest('.copy-text');
     if (copyBtn) {
       var content = copyBtn.getAttribute('data-content') || '';
-      if (navigator.clipboard) navigator.clipboard.writeText(content);
-      copyBtn.classList.add('copied');
-      setTimeout(function () { copyBtn.classList.remove('copied'); }, 1200);
+      try {
+        await copyToClipboard(content, copyBtn.closest('.sidebar') || document.body);
+        copyBtn.classList.add('copied');
+        setTimeout(function () { copyBtn.classList.remove('copied'); }, 1200);
+        ZhaoUI.message('内容已复制', {type: 'success'});
+      } catch (err) {
+        showError('复制失败，请长按文字手动复制');
+      }
       return;
     }
     var delBtn = e.target.closest('.del');
@@ -570,10 +717,10 @@
       if (!await ZhaoUI.dialog({title: '删除' + label + '？', content: '删除后无法恢复。', ok: '删除', danger: true})) return;
       delBtn.disabled = true;
       var url = (kind === 'text' ? '/text/delete/' : '/file/delete/') + encodeURIComponent(key);
-      fetch(url, { method: 'POST' }).then(function (res) {
-        if (res.ok) { refreshFeed(); refreshFavorites(); }
-        else { showError('删除失败'); delBtn.disabled = false; }
-      }).catch(function () { showError('删除失败'); delBtn.disabled = false; });
+      fetch(url, { method: 'POST' })
+        .then(function (res) { return requireOk(res, '删除失败'); })
+        .then(function () { refreshFeed(); refreshFavorites(); })
+        .catch(function (err) { showError(err.message); delBtn.disabled = false; });
       return;
     }
     var reBtn = e.target.closest('.reshare-btn');
@@ -652,9 +799,9 @@
     fd.append('file', f);
     fetch('/file/reshare/' + encodeURIComponent(pendingReshareId), {
       method: 'POST', body: fd, headers: { 'X-Nickname': nicknameHeader() }
-    }).then(function (res) {
-      if (res.ok) { refreshFeed(); refreshFavorites(); } else showError('重新分享失败');
-    }).catch(function () { showError('重新分享失败'); });
+    }).then(function (res) { return requireOk(res, '重新分享失败'); })
+      .then(function () { refreshFeed(); refreshFavorites(); })
+      .catch(function (err) { showError(err.message); });
   };
 
   if (clearTextsBtn) {
@@ -674,16 +821,7 @@
     button.onclick = async function () {
       var text = button.getAttribute('data-copy-url');
       try {
-        if (navigator.clipboard && window.isSecureContext) {
-          await navigator.clipboard.writeText(text);
-        } else {
-          var field = document.createElement('textarea');
-          field.value = text;
-          e.detail.popover.appendChild(field);
-          field.select();
-          try { if (!document.execCommand('copy')) throw new Error('Copy failed'); }
-          finally { field.remove(); }
-        }
+        await copyToClipboard(text, e.detail.popover);
         ZhaoUI.message('地址已复制');
       } catch (err) { showError('复制失败，请手动选择上方地址复制'); }
     };

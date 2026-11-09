@@ -100,6 +100,7 @@ li.msg { display: flex; flex-direction: column; gap: var(--zh-space-2); }
 .bubble { max-width: 80%; min-width: 0; padding: var(--zh-space-3) var(--zh-space-4); border: 1px solid var(--zh-border); border-radius: var(--zh-radius-lg); border-top-left-radius: var(--zh-radius-sm); background: var(--zh-bg-elevated); }
 .mine .bubble { border-color: var(--zh-primary-a20); border-top-left-radius: var(--zh-radius-lg); border-top-right-radius: var(--zh-radius-sm); background: var(--zh-color-primary-subtle); }
 .tcontent { font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+.tcontent a { color: var(--zh-color-primary-text); text-decoration: underline; }
 .file-bubble { display: flex; flex-direction: column; gap: var(--zh-space-3); }
 .file-bubble-top { display: flex; align-items: center; gap: var(--zh-space-3); min-width: 0; }
 .file-icon, .media-thumb { display: grid; place-items: center; width: 42px; height: 42px; flex: none; border-radius: var(--zh-radius-sm); background: var(--zh-accent-sky-bg); color: var(--zh-accent-sky-text); overflow: hidden; font-size: 10px; }
@@ -127,6 +128,12 @@ li.msg { display: flex; flex-direction: column; gap: var(--zh-space-2); }
 .empty svg { width: 40px; color: var(--zh-text-tertiary); margin-bottom: var(--zh-space-4); }
 .composer { flex: none; padding: var(--zh-space-4) var(--zh-space-8) var(--zh-space-5); border-top: 1px solid var(--zh-border); background: var(--zh-bg); }
 .composer-row { display: flex; align-items: flex-end; gap: var(--zh-space-3); }
+.ai-tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--zh-space-2); margin-bottom: var(--zh-space-2); font-size: 12px; }
+.ai-tools select { width: auto; min-width: 110px; }
+.ai-result { margin-bottom: var(--zh-space-2); font-size: 12px; }
+.ai-result[hidden] { display: none; }
+.ai-result textarea { display: block; width: 100%; margin-block: var(--zh-space-2); }
+.ai-result button { margin-right: var(--zh-space-2); }
 .composer textarea { flex: 1; min-width: 0; min-height: 76px; max-height: 180px; resize: none; background: var(--zh-bg-elevated); }
 .attach-btn.zh-btn { width: 40px; height: 40px; flex: none; padding: 0; }
 .attach-btn svg { width: var(--zh-icon-sm); }
@@ -137,6 +144,7 @@ li.msg { display: flex; flex-direction: column; gap: var(--zh-space-2); }
 .pending-file { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: var(--zh-space-2); align-items: center; padding: var(--zh-space-2) 0; font-size: 12px; border-bottom: 1px solid var(--zh-border); }
 .pending-file > span:first-child { color: var(--zh-text-tertiary); font-family: var(--zh-font-mono); }
 .pending-file .name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pending-state { grid-column: 2 / -1; color: var(--zh-text-secondary); overflow-wrap: anywhere; }
 .pending-file .zh-btn { height: 28px; font-size: 11px; }
 .qitem { padding-block: var(--zh-space-2); font-size: 12px; }
 .qitem .top { display: flex; justify-content: space-between; gap: var(--zh-space-3); }

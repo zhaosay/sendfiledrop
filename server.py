@@ -39,11 +39,17 @@ import socketserver
 import threading
 import time
 import urllib.parse
+import urllib.request
+import urllib.error
+import subprocess
+import tempfile
 from config import (
     BASE_DIR,
+    DATA_DIR,
     FEED_PAGE_SIZE,
     INLINE_SAFE_EXTS,
     LONGPOLL_SECONDS,
+    MAX_TEXT_CHARS,
     MAX_UPLOAD_BYTES,
     PASSCODE,
     PORT,
@@ -51,6 +57,7 @@ from config import (
 )
 from util import cached_dir_size, get_lan_ip, human_size, load_version, qr_svg_for
 from store import (
+    HistoryReadError,
     add_file,
     add_text,
     bump_version,
@@ -62,12 +69,11 @@ from store import (
     flush_files_if_dirty,
     friendly_name_for,
     online_count,
+    open_shared_file,
     reshare_file,
-    safe_share_path,
     sweep_loop,
     toggle_star_file,
     toggle_star_text,
-    touch_file_access,
     touch_presence,
     wait_version_change
 )
@@ -116,7 +122,7 @@ _VALID_CID = re.compile(r"^[0-9a-f]{32}$")
 _BOUNDARY_RE = re.compile(r'boundary=(?:"([^"]+)"|([^;\s]+))', re.I)
 
 
-AUTH_TOKEN = hashlib.sha256(("sfd-auth:" + PASSCODE).encode("utf-8")).hexdigest() if PASSCODE else ""
+AUTH_TOKEN = secrets.token_hex(32)
 
 
 LOGIN_PAGE = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -172,10 +178,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if secrets.compare_digest(self._cookies.get("sfd_auth", ""), AUTH_TOKEN):
             return True
         given = self.headers.get("X-SFD-Passcode", "")
-        return bool(given) and secrets.compare_digest(given, PASSCODE)
+        return bool(given) and secrets.compare_digest(given.encode("utf-8"), PASSCODE.encode("utf-8"))
 
     def _gate(self, path):
         """口令校验；未通过时已经回了响应，返回 False。"""
+        if self.command in ("POST", "PUT", "DELETE"):
+            origin = self.headers.get("Origin")
+            if origin and origin != "http://" + self.headers.get("Host", ""):
+                self._send_json({"error": "请求来源不受信任"}, 403)
+                return False
+            if self.headers.get("Sec-Fetch-Site") == "cross-site":
+                self._send_json({"error": "请求来源不受信任"}, 403)
+                return False
         if self._authorized():
             return True
         if self.command in ("GET", "HEAD") and path in ("/", "/index.html"):
@@ -191,7 +205,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         params = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
         given = params.get("passcode", [""])[0]
-        if PASSCODE and secrets.compare_digest(given, PASSCODE):
+        if PASSCODE and secrets.compare_digest(given.encode("utf-8"), PASSCODE.encode("utf-8")):
             self.send_response(303)
             self.send_header("Location", "/")
             self.send_header("Set-Cookie", f"sfd_auth={AUTH_TOKEN}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax")
@@ -216,17 +230,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         """校验上传大小和磁盘剩余空间；不通过时已经回了响应，返回 None。"""
         length = self._content_length()
         if self.headers.get("Content-Length") is None:
-            self._send_html("<h1>411 需要 Content-Length</h1>", 411)
+            self._send_json({"error": "缺少上传长度"}, 411)
             return None
         if length is None:
-            self._send_html("<h1>400 Content-Length 不合法</h1>", 400)
+            self._send_json({"error": "上传长度不合法"}, 400)
             return None
         if length > MAX_UPLOAD_BYTES:
-            self._send_html(f"<h1>413 文件超过上限 {html.escape(human_size(MAX_UPLOAD_BYTES))}</h1>", 413)
+            self._send_json({"error": f"文件超过上限 {human_size(MAX_UPLOAD_BYTES)}"}, 413)
             return None
         try:
             if shutil.disk_usage(SHARE_DIR).free < length + 64 * 1024 * 1024:
-                self._send_html("<h1>507 磁盘空间不足</h1>", 507)
+                self._send_json({"error": "磁盘空间不足"}, 507)
                 return None
         except OSError:
             pass
@@ -286,6 +300,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             super().handle_one_request()
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
+        except HistoryReadError as exc:
+            self.log_error("无法读取历史记录文件 %s", exc)
+            self._send_json({"error": "历史记录无法读取，相关操作已暂停"}, 503, head_only=self.command == "HEAD")
 
     # -- 页面渲染 --------------------------------------------------------
     def _render_page(self, head_only):
@@ -303,16 +320,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 '<button id="clearTexts" class="zh-btn ghost-btn" title="清空所有文字消息">清空聊天记录</button>'
                 f'<span class="disk-note">共享文件占用 {html.escape(human_size(disk_bytes))}</span>'
             )
-        page = (
-            load_page_template()
-            .replace("__URL__", html.escape(url))
-            .replace("__QR__", qr_svg_for(url))
-            .replace("__FEED__", feed_html)
-            .replace("__FAVORITES__", favorites_html)
-            .replace("__DEFAULT_NAME__", html.escape(default_name))
-            .replace("__HOST_CONTROLS__", host_controls)
-            .replace("__VERSION__", html.escape(version))
-        )
+        fields = {
+            "__URL__": html.escape(url),
+            "__QR__": qr_svg_for(url),
+            "__MAX_TEXT_CHARS__": str(MAX_TEXT_CHARS),
+            "__FEED__": feed_html,
+            "__FAVORITES__": favorites_html,
+            "__DEFAULT_NAME__": html.escape(default_name),
+            "__HOST_CONTROLS__": host_controls,
+            "__VERSION__": html.escape(version),
+        }
+        page = re.sub("|".join(fields), lambda match: fields[match[0]], load_page_template())
         self._send_html(page, head_only=head_only)
 
     def do_GET(self):
@@ -352,13 +370,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError):
                 pass
-
-    def _touch_for_request(self, name):
-        """播放视频会发很多 Range 请求；只有整文件或从头开始的请求才算一次"访问"。"""
-        rng = self.headers.get("Range")
-        if rng and not rng.startswith("bytes=0-"):
-            return
-        touch_file_access(name)
 
     def _feed_params(self, qs):
         filter_key = qs.get("filter", ["all"])[0]
@@ -430,13 +441,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if path.startswith("/download/"):
             name = os.path.basename(path[len("/download/"):])
-            self._touch_for_request(name)
             self._serve_file(name, head_only, inline=False)
             return
 
         if path.startswith("/view/"):
             name = os.path.basename(path[len("/view/"):])
-            self._touch_for_request(name)
             self._serve_file(name, head_only, inline=True)
             return
 
@@ -463,27 +472,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._send_html("<h1>404</h1>", 404, head_only=head_only)
 
     def _send_file_body(self, fpath, start, length):
+        with open(fpath, "rb") as stream:
+            self._send_file_stream(stream, start, length)
+
+    def _send_file_stream(self, stream, start, length):
         """用 sendfile 直接把文件内容送进 socket，省掉用户态来回拷贝。"""
         if length <= 0:
             return
         try:
-            with open(fpath, "rb") as f:
-                self.connection.sendfile(f, offset=start, count=length)
+            self.connection.sendfile(stream, offset=start, count=length)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True
 
     def _serve_file(self, name, head_only, inline=False):
-        fpath = safe_share_path(name)
-        if not fpath or not os.path.isfile(fpath):
+        rng = self.headers.get("Range", "")
+        # 播放视频会请求多个片段；只把整文件或从头开始的请求算作访问。
+        try:
+            stream = open_shared_file(name, touch=not rng or rng.startswith("bytes=0-"))
+        except OSError:
+            self._send_json({"error": "无法读取文件"}, 500, head_only=head_only)
+            return
+        if stream is None:
             self._send_html("<h1>404 文件不存在</h1>", 404, head_only=head_only)
             return
+        with stream:
+            self._serve_shared_stream(stream, name, head_only, inline, rng)
 
-        size = os.path.getsize(fpath)
+    def _serve_shared_stream(self, stream, name, head_only, inline, rng):
+        stat = os.fstat(stream.fileno())
+        size = stat.st_size
+        etag = '"%x-%x-%x-%x-%x"' % (stat.st_dev, stat.st_ino, size, stat.st_mtime_ns, stat.st_ctime_ns)
         start, end = 0, size - 1
 
-        rng = self.headers.get("Range")
+        if_range = self.headers.get("If-Range")
         is_partial = False
-        if rng and rng.startswith("bytes="):
+        if not head_only and rng.startswith("bytes=") and (if_range is None or if_range == etag):
             try:
                 s, _, e = rng[len("bytes="):].partition("-")
                 if s.strip():
@@ -497,6 +520,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 is_partial = True
             except ValueError:
                 self.send_response(416)
+                self.send_header("ETag", etag)
                 self.send_header("Content-Range", f"bytes */{size}")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
@@ -513,6 +537,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", f"{disposition}; filename*=UTF-8''" + urllib.parse.quote(name))
         self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
         self.send_header("Accept-Ranges", "bytes")
+        self.send_header("ETag", etag)
         self.send_header("Content-Length", str(length))
         if is_partial:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
@@ -520,7 +545,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
         if not head_only:
-            self._send_file_body(fpath, start, length)
+            self._send_file_stream(stream, start, length)
 
     # -- POST ------------------------------------------------------------
     def do_PUT(self):
@@ -567,12 +592,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
         if path == "/login":
+            origin = self.headers.get("Origin")
+            if origin and origin != "http://" + self.headers.get("Host", ""):
+                self._send_json({"error": "请求来源不受信任"}, 403); return
             self._handle_login(); return
         if not self._gate(path):
             return
 
         if path == "/text":
             self._handle_add_text(); return
+        if path == "/tools/ocr":
+            self._handle_ocr(); return
+        if path == "/tools/ai":
+            self._handle_ai(); return
         if path.startswith("/text/delete/"):
             self._handle_delete_text(path[len("/text/delete/"):]); return
         if path == "/texts/clear":
@@ -597,6 +629,85 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         self._send_html("<h1>404</h1>", 404)
 
+    def _tool_input(self):
+        length = self._content_length()
+        if length is None or length > 128 * 1024:
+            self._send_json({"error": "内容过长"}, 413)
+            return None
+        try:
+            data = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError()
+            return data
+        except (ValueError, UnicodeError):
+            self._send_json({"error": "请求内容无效"}, 400)
+            return None
+
+    def _handle_ocr(self):
+        data = self._tool_input()
+        if data is None:
+            return
+        name = data.get("name")
+        if not isinstance(name, str) or os.path.splitext(name)[1].lower() not in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".heif", ".tif", ".tiff"):
+            self._send_json({"error": "不支持此图片格式"}, 400)
+            return
+        stream = open_shared_file(name)
+        if stream is None:
+            self._send_json({"error": "图片不存在或已过期"}, 404)
+            return
+        try:
+            with stream:
+                if os.fstat(stream.fileno()).st_size > 20 * 1024 * 1024:
+                    self._send_json({"error": "图片超过 20 MB"}, 413)
+                    return
+                with tempfile.NamedTemporaryFile(suffix=os.path.splitext(name)[1]) as image:
+                    shutil.copyfileobj(stream, image)
+                    image.flush()
+                    result = subprocess.run(
+                        ["/usr/bin/swift", os.path.join(BASE_DIR, "ocr.swift"), image.name],
+                        capture_output=True, text=True, timeout=120,
+                    )
+            if result.returncode:
+                self._send_json({"error": "图片文字识别失败"}, 422)
+                return
+            self._send_json({"text": result.stdout.strip()})
+        except (OSError, subprocess.TimeoutExpired):
+            self._send_json({"error": "图片文字识别暂时不可用"}, 503)
+
+    def _handle_ai(self):
+        data = self._tool_input()
+        if data is None:
+            return
+        prompts = {
+            "organize": "整理下面的内容，保留原意、网址和账号，使用清晰的段落或列表。只输出整理结果。",
+            "links": "提取下面内容中的网址和对应账号，去除重复项。保留原始网址，不要编造。只输出结果。",
+            "translate": "将下面的内容翻译为中文，保留网址、账号和专有名称。只输出翻译结果。",
+        }
+        action, content = data.get("action"), data.get("text")
+        if not isinstance(action, str) or action not in prompts or not isinstance(content, str) or not content.strip() or len(content) > MAX_TEXT_CHARS:
+            self._send_json({"error": "请选择操作并输入不超过 20000 字符的文字"}, 400)
+            return
+        state = os.path.expanduser("~/ai/.state")
+        try:
+            with open(os.path.join(state, "current"), encoding="utf-8") as stream:
+                current = stream.read().strip()
+            if current and current != "ollama":
+                self._send_json({"error": "其他 AI 服务正在使用，请稍后再试"}, 503)
+                return
+            payload = json.dumps({
+                "model": "qwen2.5:3b",
+                "messages": [{"role": "system", "content": prompts[action]}, {"role": "user", "content": content}],
+                "stream": False,
+            }).encode("utf-8")
+            request = urllib.request.Request("http://127.0.0.1:21435/v1/chat/completions", data=payload, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=240) as response:
+                answer = json.load(response)["choices"][0]["message"]["content"]
+            if not isinstance(answer, str) or not answer.strip():
+                raise ValueError()
+            self._send_json({"text": answer.strip()})
+        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            self._send_json({"error": "本地 AI 服务暂时不可用，请稍后重试"}, 503)
+
     def _handle_star(self, kind, raw_id):
         item_id = urllib.parse.unquote(raw_id)
         if kind == "text":
@@ -615,11 +726,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         body = self.rfile.read(length).decode("utf-8", "replace")
         params = urllib.parse.parse_qs(body)
-        content = params.get("content", [""])[0].strip()
-        if not content:
+        content = params.get("content", [""])[0]
+        if not content.strip():
             self._send_html("<h1>400 内容为空</h1>", 400)
             return
-        add_text(content[:20000], self._nickname(), self._client_id)
+        if len(content) > MAX_TEXT_CHARS:
+            self._send_json({"error": f"文字最多 {MAX_TEXT_CHARS} 字符，内容未发送"}, 413)
+            return
+        request_id = self.headers.get("X-SFD-Request-ID")
+        if request_id is not None and not re.fullmatch(r"[a-f0-9]{32}", request_id):
+            self._send_json({"error": "发送请求编号无效"}, 400)
+            return
+        if not add_text(content, self._nickname(), self._client_id, request_id):
+            self._send_json({"error": "发送请求编号已用于其他内容"}, 409)
+            return
         self._send_html("ok")
 
     def _handle_delete_text(self, raw_id):
@@ -646,7 +766,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ctype = self.headers.get("Content-Type", "")
         m = _BOUNDARY_RE.search(ctype)
         if "multipart/form-data" not in ctype or not m:
-            self._send_html("<h1>400 需要 multipart 表单</h1>", 400)
+            self._send_json({"error": "上传格式不正确"}, 400)
             return None
         length = self._check_upload_length()
         if length is None:
@@ -654,25 +774,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             return read_multipart_files(self.rfile, length, m.group(1) or m.group(2))
         except UploadError as e:
-            self._send_html(f"<h1>{e.status} {html.escape(e.message)}</h1>", e.status)
+            self._send_json({"error": e.message}, e.status)
         except (OSError, ValueError) as e:
             self.close_connection = True
             if not isinstance(e, (ConnectionError, TimeoutError)):
-                self._send_html(f"<h1>500 上传失败: {html.escape(str(e))}</h1>", 500)
+                self.log_error("上传读取失败: %s", e)
+                self._send_json({"error": "服务器无法接收文件"}, 500)
         return None
 
     def _handle_upload(self):
+        request_id = self.headers.get("X-SFD-Request-ID")
+        if request_id is not None and not re.fullmatch(r"[a-f0-9]{32}", request_id):
+            self._send_json({"error": "发送请求编号无效"}, 400)
+            return
         sinks = self._read_upload()
         if sinks is None:
             return
         sender = self._nickname()
         try:
+            if request_id and len(sinks) != 1:
+                self._send_json({"error": "每个请求编号只能上传一个文件"}, 400)
+                return
             while sinks:
                 sink = sinks[0]
-                add_file(sink.filename, sink.path, sink.size, sender, self._client_id)
+                add_file(sink.filename, sink.path, sink.size, sender, self._client_id, request_id)
                 sinks.pop(0)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 409)
+            return
         except OSError as e:
-            self._send_html(f"<h1>500 保存失败: {html.escape(str(e))}</h1>", 500)
+            self.log_error("上传保存失败: %s", e)
+            self._send_json({"error": "服务器无法保存文件"}, 500)
             return
         finally:
             for sink in sinks:
@@ -681,7 +813,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _handle_delete_file(self, raw_id):
         entry_id = urllib.parse.unquote(raw_id)
-        result = delete_file(entry_id, self._client_id, self._is_host())
+        try:
+            result = delete_file(entry_id, self._client_id, self._is_host())
+        except OSError as exc:
+            self.log_error("删除文件失败: %s", exc)
+            self._send_json({"error": "无法删除文件，请稍后重试"}, 500)
+            return
         if result == "notfound":
             self._send_html("<h1>404</h1>", 404); return
         if result == "forbidden":
@@ -697,17 +834,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not sinks:
                 self._send_html("<h1>400 未选择文件</h1>", 400)
                 return
-            first = sinks.pop(0)
+            first = sinks[0]
             try:
                 result = reshare_file(entry_id, first.path, first.size, self._nickname(), self._client_id)
             except OSError as e:
-                first.discard()
-                self._send_html(f"<h1>500 保存失败: {html.escape(str(e))}</h1>", 500)
+                self.log_error("重新分享保存失败: %s", e)
+                self._send_json({"error": "服务器无法保存文件"}, 500)
                 return
             if result is None:
-                first.discard()
-                self._send_html("<h1>404 记录不存在或未过期</h1>", 404)
+                self._send_json({"error": "记录不存在或未过期"}, 404)
                 return
+            sinks.pop(0)
         finally:
             for sink in sinks:
                 sink.discard()
@@ -816,7 +953,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             base_rev = int(base_rev) if base_rev else None
         except (ValueError, TypeError):
-            base_rev = None
+            self._send_json({"error": "Invalid base revision"}, code=400)
+            return
 
         length = self._content_length()
         if length is None or self.headers.get("Content-Length") is None:
@@ -861,7 +999,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             base_rev = int(base_rev) if base_rev else None
         except (ValueError, TypeError):
-            base_rev = None
+            self._send_json({"error": "Invalid base revision"}, code=400)
+            return
 
         device = device or "host"
         success, error = sync_store.delete_file(folder_id, rel_path, base_rev, device)
@@ -890,6 +1029,12 @@ class ThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def main():
+    marker = os.path.join(DATA_DIR, 'studio-primary.json')
+    if os.path.isfile(marker):
+        with open(marker, encoding='utf-8') as stream:
+            primary = json.load(stream)['url']
+        print('本机为接入端，文件中枢位于 ' + primary)
+        return
     ip = get_lan_ip()
     server = ThreadingServer(("0.0.0.0", PORT), Handler)
     cleanup_stale_uploads()

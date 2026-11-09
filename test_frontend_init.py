@@ -18,10 +18,15 @@ class FrontendInitTest(unittest.TestCase):
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const elements = new Map();
+const timers = [];
+const statusRequests = [];
+let statusVersion = 1;
+let bundleFailures = 0;
+const textRequests = [];
 function element(id) {
   if (!elements.has(id)) elements.set(id, {
     children: [], listeners: {},
-    value: '',
+    value: '', dataset: {maxChars: '20000'},
     style: {values: {}, setProperty(name, value) {this.values[name] = value}},
     classList: {
       values: new Set(), add(name) {this.values.add(name)}, remove(name) {this.values.delete(name)},
@@ -38,6 +43,7 @@ function element(id) {
   return elements.get(id);
 }
 const context = {
+  crypto: require('node:crypto').webcrypto,
   document: {
     title: 'sendfiledrop', documentElement: element('root'),
     getElementById: element, querySelector: element,
@@ -51,7 +57,20 @@ const context = {
   },
   localStorage: {getItem() {return ''}},
   ZhaoUI: {setTheme() {}, setBrand() {}, message() {}, open() {}, close() {}},
-  fetch: async () => ({ok: true, text: async () => '', json: async () => ({senders: [], online: 1, version: 0})}),
+  fetch: async (url, options) => {
+    if (url === '/text') {
+      textRequests.push(options.headers['X-SFD-Request-ID']);
+      if (textRequests.length === 1) throw new Error('response lost');
+    }
+    if (url.startsWith('/status')) statusRequests.push(url);
+    if (url.startsWith('/bundle') && bundleFailures > 0) {
+      bundleFailures--;
+      throw new Error('offline');
+    }
+    return {ok: true, text: async () => url.startsWith('/feed') ? 'version ' + statusVersion : '', json: async () => ({
+      senders: [], online: 1, version: statusVersion, feed: 'version ' + statusVersion, favorites: ''
+    })};
+  },
   FormData: class {append() {}},
   XMLHttpRequest: class {
     constructor() {this.upload = {}; this.status = 200}
@@ -59,7 +78,7 @@ const context = {
     send() {uploads++; this.status = uploadStatus; this.onload()}
   },
   alert() {},
-  setInterval() {}, setTimeout() {}, console
+  setInterval() {}, setTimeout(handler, delay) {timers.push({handler, delay})}, console
 };
 vm.createContext(context);
 let uploads = 0;
@@ -120,6 +139,64 @@ assert.equal(typeof element('sendBtn').onclick, 'function');
   assert.equal(mainPane.classList.contains('filters-collapsed'), false, 'Toggle must expand the mobile filter bar');
   element('filterToggle').onclick();
   assert.equal(mainPane.classList.contains('filters-collapsed'), true, 'Toggle must collapse it again');
+  const copyMessages = [];
+  const original = '第一行\nhttps://www.instagram.com/esmehuang_';
+  const copyButton = element('copyButton');
+  copyButton.getAttribute = () => original;
+  copyButton.closest = () => null;
+  context.ZhaoUI.message = (message, options) => copyMessages.push([message, options.type]);
+  context.window.isSecureContext = false;
+  const field = {
+    style: {}, focus() {}, select() {}, remove() {},
+    setSelectionRange(start, end) {assert.deepEqual([start, end], [0, original.length])}
+  };
+  context.document.createElement = () => field;
+  let copyAllowed = true;
+  context.document.execCommand = command => {
+    assert.equal(command, 'copy');
+    assert.equal(field.value, original);
+    return copyAllowed;
+  };
+  const copy = () => element('feed').listeners.click({
+    currentTarget: element('feed'),
+    target: {closest: selector => selector === '.copy-text' ? copyButton : null}
+  });
+  await copy();
+  assert.deepEqual(copyMessages.pop(), ['内容已复制', 'success']);
+  copyAllowed = false;
+  await copy();
+  assert.deepEqual(copyMessages.pop(), ['复制失败，请长按文字手动复制', 'error']);
+  const input = element('textInput');
+  assert.equal(input.listeners.keydown, undefined, 'Enter must retain native multiline and IME behavior');
+  input.value = 'a'.repeat(20001);
+  await element('sendBtn').onclick();
+  assert.equal(input.value.length, 20001, 'Oversize draft must stay in the composer');
+  assert.match(copyMessages.pop()[0], /20000/);
+  const nextPoll = delay => {
+    const index = timers.findIndex(timer => timer.handler.name === 'poll' && timer.delay === delay);
+    assert.notEqual(index, -1, 'Expected a scheduled poll');
+    return timers.splice(index, 1)[0].handler();
+  };
+  await new Promise(resolve => setImmediate(resolve));
+  statusVersion = 2;
+  bundleFailures = 1;
+  await nextPoll(0);
+  assert.equal(element('connectionStatus').hidden, false);
+  assert.equal(element('feed').innerHTML, 'version 1');
+  await nextPoll(3000);
+  assert.deepEqual(statusRequests, ['/status', '/status?since=1', '/status?since=1']);
+  assert.equal(element('connectionStatus').hidden, true);
+  assert.equal(element('feed').innerHTML, 'version 2');
+  input.value = 'retry this text';
+  await element('sendBtn').onclick();
+  assert.equal(input.value, 'retry this text');
+  await element('sendBtn').onclick();
+  assert.equal(input.value, '');
+  assert.match(textRequests[0], /^[0-9a-f]{32}$/);
+  assert.equal(textRequests[0], textRequests[1], 'A retry must reuse the original request ID');
+  input.value = 'retry this text';
+  await element('sendBtn').onclick();
+  assert.notEqual(textRequests[1], textRequests[2], 'A new send must receive its own ID');
   console.log('Upload initialization, draft, send, and retry checks passed');
 })().catch(error => {console.error(error); process.exitCode = 1});
 """

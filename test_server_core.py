@@ -304,6 +304,36 @@ class ServerTest(unittest.TestCase):
         r, data = self.request("POST", "/texts/clear", headers={"X-Forwarded-For": "10.0.0.9"})
         self.assertEqual(r.status, 403)
 
+    def test_resume_checks_the_open_file_version(self):
+        payload = b"abcdef"
+        self.assertEqual(self.upload([("resume.bin", payload)])[0].status, 200)
+        route = "/download/resume.bin"
+        response, _ = self.request("HEAD", route)
+        etag = response.getheader("ETag")
+        self.assertTrue(etag)
+        for validator, status, body in ((etag, 206, b"def"), ('"old-file"', 200, payload)):
+            response, data = self.request("GET", route, headers={"Range": "bytes=3-", "If-Range": validator})
+            self.assertEqual((response.status, data), (status, body))
+
+    def test_text_retry_and_literal_template_markers(self):
+        response, _ = self.request("GET", "/")
+        headers = {
+            "Cookie": response.getheader("Set-Cookie").split(";", 1)[0],
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-SFD-Request-ID": "af" * 16,
+        }
+        marker = "literal __VERSION__ __MAX_TEXT_CHARS__ __FAVORITES__ __FEED__"
+        message = "a" * 510 + marker
+        body = urllib.parse.urlencode({"content": message})
+        for _ in range(2):
+            self.assertEqual(self.request("POST", "/text", body, headers)[0].status, 200)
+        self.assertEqual(self.request("POST", "/text", "content=different", headers)[0].status, 409)
+        _, data = self.request("GET", "/feed?filter=text&q=" + urllib.parse.quote(marker))
+        self.assertEqual(data.count(b'class="msg '), 1)
+        self.assertIn(message.encode(), data)
+        _, page = self.request("GET", "/")
+        self.assertIn(message.encode(), page)
+
 
 if __name__ == "__main__":
     unittest.main()

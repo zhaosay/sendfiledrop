@@ -3,10 +3,41 @@
 import datetime
 import html
 import os
+import re
 import urllib.parse
 from config import BASE_DIR, FEED_PAGE_SIZE
 from util import format_remaining, human_size
 from store import load_files, load_texts, ttl_days_for_size
+
+
+_TEXT_LINK = re.compile(
+    r'\[(?P<label>[^\[\]\r\n]+)\]\((?P<markdown_url>https?://[^\s<>"()]+)\)'
+    r'|(?P<plain_url>https?://[^\s<>"，。；！？、）】》]+)',
+    re.IGNORECASE,
+)
+
+
+def _render_text_content(content):
+    parts = []
+    end = 0
+    for match in _TEXT_LINK.finditer(content):
+        parts.append(html.escape(content[end:match.start()]))
+        end = match.end()
+        suffix = ""
+        url = match["markdown_url"]
+        if url:
+            label = match["label"].replace(r"\_", "_")
+        else:
+            raw_url = match["plain_url"]
+            url = raw_url.rstrip(".,;:!?")
+            while url.endswith(")") and url.count(")") > url.count("("):
+                url = url[:-1].rstrip(".,;:!?")
+            suffix = raw_url[len(url):]
+            label = url.replace(r"\_", "_")
+        href = html.escape(url.replace(r"\_", "_"))
+        parts.append(f'<a href="{href}">{html.escape(label)}</a>{html.escape(suffix)}')
+    parts.append(html.escape(content[end:]))
+    return "".join(parts)
 
 
 def _empty_block(title, sub):
@@ -55,7 +86,6 @@ def render_text_item(entry, viewer_cid, is_host):
     is_mine = entry.get("client_id") == viewer_cid
     can_delete = is_host or is_mine
     side = "mine" if is_mine else "other"
-    search_val = html.escape(content.lower())[:500]
     star_btn = _star_btn("text", str(entry.get("id", "")), viewer_cid in (entry.get("starred_by") or []))
 
     del_btn = ""
@@ -72,9 +102,9 @@ def render_text_item(entry, viewer_cid, is_host):
         '<rect x="9" y="9" width="11" height="11" rx="2"/>'
         '<path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/></svg></button>'
     )
-    bubble = f'<div class="bubble"><div class="tcontent">{safe_content}</div></div>'
+    bubble = f'<div class="bubble"><div class="tcontent">{_render_text_content(content)}</div></div>'
     return (
-        f'<li class="msg {side}" data-search="{search_val}" data-meta="{ts}">'
+        f'<li class="msg {side}">'
         f'<div class="msg-meta">{sender} · {when}</div>'
         f'<div class="msg-row">{bubble}</div>'
         f'<div class="actions">{star_btn}{copy_btn}{del_btn}</div>'
@@ -96,7 +126,6 @@ def render_file_item(entry, viewer_cid, is_host):
     side = "mine" if is_mine else "other"
     ext = os.path.splitext(name)[1].lower().lstrip(".") or "file"
     ext_label = html.escape(ext[:5].upper())
-    search_val = html.escape(name.lower())
     star_btn = _star_btn("file", str(entry.get("id", "")), viewer_cid in (entry.get("starred_by") or []))
 
     del_btn = ""
@@ -123,7 +152,7 @@ def render_file_item(entry, viewer_cid, is_host):
             f'<div class="meta">{human_size(entry.get("size", 0))} · {meta_line}</div></div></div></div>'
         )
         return (
-            f'<li class="msg {side} ghost" data-search="{search_val}" data-meta="{uploaded_ts}">'
+            f'<li class="msg {side} ghost">'
             f'<div class="msg-meta">{sender} · {when}</div>'
             f'<div class="msg-row">{bubble}</div>'
             f'<div class="actions">{star_btn}{reshare_btn}{del_btn}</div>'
@@ -146,6 +175,12 @@ def render_file_item(entry, viewer_cid, is_host):
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
         '<path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14" stroke-linecap="round" stroke-linejoin="round"/></svg></a>'
     )
+    ocr_btn = ""
+    if kind == "image":
+        ocr_btn = (
+            f'<button class="zh-btn dl ocr-btn" data-name="{safe_name}" title="提取图片文字" aria-label="提取图片文字">'
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8V4h4m8 0h4v4M4 16v4h4m8 0h4v-4M8 16l4-8 4 8M9 14h6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>'
+        )
     size_bytes = entry.get("size", 0)
     expire_ts = uploaded_ts + ttl_days_for_size(size_bytes) * 86400
     remaining = expire_ts - datetime.datetime.now().timestamp()
@@ -157,10 +192,10 @@ def render_file_item(entry, viewer_cid, is_host):
     )
     bubble = f'<div class="bubble file-bubble">{bubble_top}{preview_html}</div>'
     return (
-        f'<li class="msg {side}" data-search="{search_val}" data-meta="{uploaded_ts}">'
+        f'<li class="msg {side}">'
         f'<div class="msg-meta">{sender} · {when}</div>'
         f'<div class="msg-row">{bubble}</div>'
-        f'<div class="actions">{star_btn}{dl_btn}{del_btn}</div>'
+        f'<div class="actions">{star_btn}{ocr_btn}{dl_btn}{del_btn}</div>'
         '</li>'
     )
 
