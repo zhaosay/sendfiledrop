@@ -1,153 +1,167 @@
-# sendfiledrop
+# SendFileDrop
 
-同一 WiFi / 局域网下的文件与文字互传工具。打开浏览器就能用，零依赖，只用 Python 3 自带的标准库，不需要安装任何东西、不需要联网。
+[English](#english) · [中文](#中文)
 
-## 特点
+## English
 
-- **零依赖**：只用 `python3` 标准库，不用 `pip install` 任何包，二维码也是离线生成的
-- **聊天式界面**：文字、图片、音频、视频、任意文件统一放在一条时间流里，自己发的在右边、别人发的在左边，跟聊天软件一样
-- **扫码即连**：启动后自动生成局域网地址的二维码，手机相机或微信扫一下就能打开，不用手动输网址
-- **多设备协作**：每台设备自动分配一个昵称，可以自己改名；有收藏、搜索、在线设备数、消息通知（新内容会有提示音和标题闪烁）
-- **权限合理**：每条内容只有发送者本机能删，开着服务的那台电脑始终有兜底删除权限
-- **文件自动清理**：小于 1GB 的文件 3 天后自动清除内容，大于等于 1GB 的文件 1 天后清除；清除后记录还留着，可以随时"重新分享"续上
-- **移动端友好**：窄屏下工具栏收成侧滑抽屉，界面固定一屏、不会晃动或溢出
-- **剪切板粘贴**：Ctrl+V / Cmd+V 粘贴图片到待发送列表，点击发送后上传
-- **发送者列表**：侧边栏显示最近活跃的人，点击快速筛选TA的内容
-- **时间段筛选**：按"今天 / 本周 / 本月"快速查找不同时期的内容
-- **ZhaoUI 界面**：本地内置 ZhaoUI 0.1.5，统一按钮、输入框、消息提示和确认框，支持浅色、深色与跟随系统
+SendFileDrop is a browser-based tool for sharing messages and files between devices on the same local network.
 
-## 快速开始
+### Features
 
-```bash
-python3 server.py            # 默认端口 8000
-python3 server.py 9000       # 指定端口
-```
+- Share text, clickable links, images, videos, audio, and other files in a shared timeline.
+- Connect phones and computers with a LAN address or QR code.
+- Search, filter, preview media, and bookmark items in the current browser.
+- Paste screenshots or select multiple files, review the queue, and send them.
+- Extract text from supported images on macOS using Apple Vision.
+- Organize text, extract links, or translate text into Chinese using a compatible local AI service.
+- Synchronize folders with the included sync client.
 
-macOS 也可以直接双击 `启动.command`（首次运行如果被系统拦截，见下方"打不开怎么办"）。
+The interface uses the bundled ZhaoUI assets and supports light and dark themes. The current interface labels are in Chinese.
 
-启动后终端会打印两个地址：
+### Requirements
 
-```
-本机打开:   http://127.0.0.1:8000
-局域网打开: http://192.168.1.23:8000
-```
+The core server requires Python 3 and uses the standard library. Frontend tests also require Node.js. Image recognition requires macOS, Swift, and Apple Vision.
 
-同一 WiFi 下的其他设备用浏览器打开局域网地址（或扫页面上的二维码）即可使用。
+AI processing requires an OpenAI-compatible chat endpoint at `http://127.0.0.1:21435/v1/chat/completions`, the `qwen2.5:3b` model, and the scheduler state file `~/ai/.state/current`. These environment-specific integrations are not included in this repository. The app reports when the service is unavailable or another configured AI service is active.
 
-## 怎么用
-
-- **发文字**：底部输入框打字，回车发送（Shift+回车换行）
-- **发文件**：点输入框旁的附件按钮选文件，或直接把文件拖进对话区；文件先进入待发送列表，可移除，点击「发送」后依次上传并显示进度；也可以 **Ctrl+V / Cmd+V 粘贴图片**，或附带文字一起发送
-- **查看内容**：顶部筛选"全部 / 文字列表 / 多媒体列表 / 文件列表"，配合时间筛选（今天/本周/本月）和发送者列表快速定位
-- **折叠顶部**：手机上点顶部栏的箭头按钮，收起内容类型和时间筛选，让聊天区更大；默认就是折叠的，折叠时顶部会显示当前筛选条件，点箭头展开；展开后会记住你的选择
-- **预览图片**：双击（手机上双击轻点）图片缩略图，放大查看原图；点空白处、按 Esc 或点「关闭」退出
-- **搜索**：搜索框支持按文件名、文字内容、发送者查找（如果有多个发送者，点侧边栏的发送者名字快速筛选）
-- **收藏**：点每条内容操作栏里的收藏按钮，会出现在左侧收藏列表（收藏是每台设备自己的，不影响别人看到的内容）
-- **改昵称**：点顶部昵称按钮，随时改成自己喜欢的名字
-- **删除 / 清空**：只能删自己发的内容；主机本机额外有"清空聊天记录"按钮，可一键清空所有文字消息
-
-## 界面与主题
-
-界面使用 ZhaoUI 0.1.5 的原生组件和主题变量，保留左侧连接信息与右侧聊天时间流。项目内置 CSS、JS 和许可文件，运行时不需要联网，也不需要安装 npm 依赖。
-
-- 页面右上角可选择浅色、深色或跟随系统，选择会保存在当前浏览器。
-- 昵称修改、删除确认和错误提示使用 ZhaoUI 对话框与消息组件。
-- 手机上，连接二维码、搜索、发送者与收藏收进侧栏，菜单可打开，关闭按钮、点击遮罩或 Esc 可关闭。
-- 手机顶部合并品牌与外观选择，筛选分为两行；主要按钮使用 44px 触控区域，输入区适配可视高度和底部安全区域，二维码居中展示。
-- 消息显示序号，搜索和筛选后按当前显示顺序重新编号。
-- 左栏顶部固定搜索、昵称和连接设备入口；「收藏 / 最近活跃」选项卡共用中间滚动区，并记住上次选择。底部始终显示占用空间、清空记录和版本，连接二维码点击后在浮层中展开。
-- `static/app.css` 保存本项目的布局和纸感主题；`static/vendor/zhaoui/` 保存组件库原文件，升级时应整套替换并保留许可声明。
-
-更详细的使用说明见 [使用说明.md](./使用说明.md)。
-
-## 文件生命周期
-
-这不是一个永久存储的网盘，设计上就是"局域网内临时传一下"：
-
-- 文件保存在同目录下的 `shared/` 文件夹里，上传满一定时间后**内容**会被自动清除（小文件 3 天，1GB 以上大文件 1 天）
-- 清除后共享列表里的记录（文件名、大小、上传时间）还保留着，标注"已过期，内容已清除"，任何人都可以点"重新分享"重新选文件把内容续上
-- 记录本身如果一直没人续上，30 天后会被彻底移除
-- 文字消息不受此限制，永久保留，只能手动删除或由主机一键清空
-
-## 项目结构
-
-```
-server.py       入口：HTTP 路由、静态资源、口令校验、长轮询
-config.py       配置：端口、数据目录、常量与环境变量
-store.py        数据层：文字/文件记录、在线状态、过期清理
-render.py       渲染：文字/文件列表项、页面模板加载
-uploads.py      流式 multipart 上传解析
-util.py         小工具：二维码、体积格式化、局域网 IP
-sync_store.py   同步文件夹的 sqlite 存储
-sync_client.py  同步代理脚本
-templates/      页面模板 index.html
-static/         前端脚本 app.js、样式与本地 ZhaoUI 组件库
-qr.py           离线二维码生成器（纯标准库，无需联网）
-启动.command    macOS 双击启动脚本
-使用说明.md     详细使用说明（中文）
-shared/         上传的文件实际存放位置（运行时自动创建，不进版本库）
-texts.json      文字消息数据（运行时自动生成，不进版本库）
-files.json      文件元数据（运行时自动生成，不进版本库）
-sync.db         同步文件夹的清单（sqlite；旧版 sync.json 首次启动时自动导入，并改名为 sync.json.migrated 备份）
-```
-
-回归检查：
+### Quick start
 
 ```bash
-python3 -m unittest test_server_core      # 上传/下载/Range/缓存/长轮询/分页等 HTTP 行为
-python3 -m unittest test_frontend_init    # 前端初始化（需要 Node.js，日常运行只需要 Python）
-python3 -m unittest test_sync_store       # 同步元数据 sqlite 存储与旧 sync.json 迁移
-python3 test_sync_e2e.py                  # 同步代理端到端
+git clone https://github.com/zhaosay/sendfiledrop.git
+cd sendfiledrop
+python3 server.py
 ```
 
-## 换端口
+The default port is 8000. To use another port, run `python3 server.py 9000`. On macOS, you can also double-click `启动.command`. Open the displayed LAN address on another device on the same network, or scan the QR code under **连接设备**.
 
-默认端口 8000，被占用时可以指定别的端口：
+### Using the app
 
-```bash
-python3 server.py 9000
-```
+1. Type a message. Enter inserts a new line. Click **发送** to send.
+2. Select files, drag them into the page, or paste an image. Review the pending list and click **发送**.
+3. Click the text-recognition icon beside an image. Edit, copy, or place the result in the composer.
+4. Enter text, choose an action under **AI 内容处理**, and click **处理输入框内容**. Review the result before copying it or replacing the composer text.
+5. Use the sidebar to search, filter by sender, view favorites, change your nickname, or connect another device.
 
-## 打不开怎么办（macOS 安全提示）
+### File retention
 
-第一次双击 `启动.command` 若提示"无法打开，因为来自身份不明的开发者"：
+Files smaller than 1 GiB expire after 3 days. Files of 1 GiB or larger expire after 1 day. An expired entry remains for 30 days and can be reshared. Text messages remain until deleted. The default upload-request limit is 10 GiB, and a text message can contain up to 20,000 characters.
 
-- 右键点 `启动.command` → 选「打开」→ 再点「打开」；或
-- 系统设置 → 隐私与安全性 → 找到该提示点「仍要打开」
+### Configuration
 
-## 版本历史
-
-- **v0.3.3-dev** 手机顶部筛选栏可折叠且默认折叠：点顶部栏右侧箭头展开/收起，折叠时显示当前筛选摘要，状态记在本机浏览器
-- **v0.3.2-dev** 新增图片放大预览：双击（手机双击轻点）缩略图查看原图，点空白处、Esc 或「关闭」退出
-- **v0.3.1-dev** 性能、稳定性与安全加固
-  - 上传改为流式处理（400MB 上传服务端内存不增长），新增大小上限和磁盘空间检查
-  - 内存缓存 + 长轮询 + 分页，搜索/时间/发送者筛选改到服务端；HTTP/1.1 长连接、`sendfile` 下载、静态资源 ETag/gzip
-  - 同步清单迁移到 sqlite（旧 `sync.json` 自动导入并备份），同步代理改为流式上传下载
-  - 修复同名文件并发上传覆盖、昵称 XSS；`/view/` 仅内联安全类型；Cookie `HttpOnly`；新增可选访问口令 `SFD_PASSCODE`
-  - `server.py` 拆分为 config / store / render / uploads / util 模块，页面模板和前端脚本独立成文件
-
-- **v0.2.0** (2024-09-29) 
-  - 新增剪切板粘贴图片功能
-  - 新增发送者列表可视化（侧边栏显示最近活跃的人）
-  - 新增时间段筛选（今天/本周/本月）
-  - 版本号显示在侧边栏底部
-  - 完整的设计系统升级（Geist 字体、6 层文字颜色、6 类按钮、暗黑模式）
-  
-- **v0.1.0** 初始发布
-  - 聊天式界面、文件生命周期管理、收藏、搜索
-
-## 可选配置（环境变量）
-
-| 变量 | 作用 | 默认 |
+| Environment variable | Purpose | Default |
 | --- | --- | --- |
-| `SFD_PASSCODE` | 设置访问口令；非本机设备首次打开要输入口令，同步代理用 `--passcode` 或同名环境变量 | 不设置（无口令） |
-| `SFD_MAX_UPLOAD_BYTES` | 单次上传大小上限（字节），超过直接返回 413 | 10GB |
-| `SFD_DATA_DIR` | 数据目录（`shared/`、`texts.json`、`files.json`） | 脚本所在目录 |
+| `SFD_DATA_DIR` | Directory for uploads, messages, and sync data | Project directory |
+| `SFD_MAX_UPLOAD_BYTES` | Maximum upload request size in bytes | 10 GiB |
+| `SFD_PASSCODE` | Optional access passcode for non-host devices | Unset |
 
 ```bash
-SFD_PASSCODE=我的口令 python3 server.py
+SFD_DATA_DIR="$HOME/sendfiledrop-data" python3 server.py
 ```
 
-## 安全提示
+When configured, non-host devices must enter the passcode. The sync client accepts `--passcode` or the `SFD_PASSCODE` environment variable.
 
-这是明文 HTTP、无密码的服务，适合家里/办公室这种可信的局域网内临时传文件和消息，**不要把端口暴露到公网**。同一局域网内的任何人都能看到、上传、删除共享的内容。
+### Folder synchronization
+
+Create a sync folder on the host, then run the client on a device with a local folder:
+
+```bash
+python3 sync_client.py http://HOST:8000 --folder FOLDER_NAME --dir /path/to/local/folder
+```
+
+Add `--once` to run one synchronization pass. The client records revisions and creates conflict copies when both sides have changed.
+
+### Security and data
+
+The server listens on the local network and uses plain HTTP. By default, devices that can reach it can access shared content. A passcode restricts access but does not encrypt traffic. Use a trusted network and avoid exposing the port directly to the public internet. Runtime data, including `shared/`, message records, sync data, and logs, is excluded by `.gitignore`.
+
+### Tests
+
+```bash
+python3 -m unittest -q
+python3 test_sync_e2e.py
+```
+
+The end-to-end sync test starts an isolated server on port 8130.
+
+## 中文
+
+SendFileDrop 是用于局域网内传送文件和文字的网页工具。Mac、电脑、平板和手机打开同一个地址，即可在共享时间线上交换消息与文件。
+
+### 功能
+
+- 在电脑或手机浏览器中分享文字、可点击链接、图片、视频、音频和其他文件。
+- 使用局域网地址或二维码连接其他设备。
+- 搜索和筛选记录、预览媒体，并在当前浏览器中收藏内容。
+- 粘贴截图或选择多个文件，确认待发送列表后一起发送。
+- 在 macOS 上使用 Apple Vision 提取支持格式的图片文字。
+- 通过兼容的本地 AI 服务整理文字、提取链接或翻译成中文。
+- 使用附带的同步客户端同步本地文件夹。
+
+界面使用项目内置的 ZhaoUI 资源，支持浅色和深色主题。
+
+### 环境要求
+
+核心服务使用 Python 3 和标准库。前端测试需要 Node.js。图片文字识别需要 macOS、Swift 和 Apple Vision 框架。
+
+AI 内容处理需要在 `http://127.0.0.1:21435/v1/chat/completions` 提供兼容 OpenAI 格式的本地聊天接口，安装 `qwen2.5:3b` 模型，并使用 `~/ai/.state/current` 中的本地 AI 调度状态。这些是特定环境的集成，未包含在本仓库中。如果集成不可用或其他已配置的 AI 服务正在运行，页面会显示提示。
+
+### 快速开始
+
+```bash
+git clone https://github.com/zhaosay/sendfiledrop.git
+cd sendfiledrop
+python3 server.py
+```
+
+默认端口为 8000。如需使用其他端口，可运行 `python3 server.py 9000`。macOS 用户也可以双击 `启动.command`。其他设备连接同一个网络后，可以打开服务打印的局域网地址，或使用「连接设备」里的二维码。
+
+### 使用方法
+
+1. 在输入框输入文字。按 Enter 换行，点击「发送」发送。
+2. 选择文件、拖入文件，或粘贴图片。确认待发送列表后点击「发送」。
+3. 点击图片旁的文字识别图标，提取图片文字。结果可以编辑、复制或放入输入框。
+4. 在输入框填写文字，在「AI 内容处理」中选择操作，再点击「处理输入框内容」。检查结果后可以复制或替换输入框内容。
+5. 使用侧栏搜索、按发送者筛选、查看收藏、修改昵称或连接其他设备。
+
+更详细的中文使用说明见 [使用说明.md](./使用说明.md)。
+
+### 文件保留时间
+
+小于 1 GiB 的文件在上传 3 天后过期，1 GiB 及以上文件在 1 天后过期。过期记录保留 30 天，可以通过重新上传续用。文字消息会保留到手动删除为止。默认单次上传请求上限为 10 GiB，一条文字消息最多 20,000 个字符。
+
+### 配置
+
+| 环境变量 | 作用 | 默认值 |
+| --- | --- | --- |
+| `SFD_DATA_DIR` | 上传文件、消息记录和同步数据的目录 | 项目目录 |
+| `SFD_MAX_UPLOAD_BYTES` | 单次上传请求的字节数上限 | 10 GiB |
+| `SFD_PASSCODE` | 非主机设备访问时使用的可选口令 | 未设置 |
+
+```bash
+SFD_DATA_DIR="$HOME/sendfiledrop-data" python3 server.py
+```
+
+设置口令后，非主机设备需要输入口令。同步客户端可以通过 `--passcode` 或 `SFD_PASSCODE` 环境变量提供口令。
+
+### 文件夹同步
+
+在主机上创建同步文件夹后，在需要同步本地目录的设备上运行：
+
+```bash
+python3 sync_client.py http://HOST:8000 --folder FOLDER_NAME --dir /path/to/local/folder
+```
+
+添加 `--once` 可只执行一次同步。客户端会记录版本，并在两端均有修改时创建冲突副本。
+
+### 安全与数据
+
+服务在局域网内监听，使用明文 HTTP。默认未设置口令，能够连接服务的设备可以访问共享内容。口令可限制访问，但不会加密传输。请在可信网络内使用，避免将端口直接暴露到公网。`shared/`、消息记录、同步数据和日志等运行数据已由 `.gitignore` 排除。
+
+### 测试
+
+```bash
+python3 -m unittest -q
+python3 test_sync_e2e.py
+```
+
+端到端同步测试会在 8130 端口启动隔离服务。
